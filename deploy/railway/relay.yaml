@@ -54,3 +54,14 @@ chains:
         fee_token: true
     signers:
       num_signers: 3
+  # Rise testnet. Our uniform contract set is deployed here too (CREATE2 -> same
+  # top-level addresses as Base Sepolia). Public RPC, no secret in the image.
+  11155931:
+    endpoint: "https://indexing.testnet.riselabs.xyz"
+    sim_mode: trace
+    assets:
+      ethereum:
+        address: "0x0000000000000000000000000000000000000000"
+        fee_token: true
+    signers:
+      num_signers: 3
