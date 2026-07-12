@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COALESCE(SUM(eth_spent), 0) AS \"total!\"\n            FROM sponsorship_usage\n            WHERE chain_id = $1\n              AND sponsored_at >= NOW() - make_interval(hours => $2::int)\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total!",
+        "type_info": "Numeric"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9c039f8a9a99511d41b4fa413119bc1a25b8ff78151568a7931db2688971be4d"
+}

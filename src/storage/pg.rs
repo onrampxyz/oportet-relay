@@ -1950,26 +1950,22 @@ impl StorageApi for PgStorage {
         Ok(result)
     }
 
-    // ponytail: these three use the unchecked `sqlx::query` (not `query!`) so the
-    // crate compiles without a live DB / `cargo sqlx prepare`. Upgrade to `query!`
-    // + prepared `.sqlx` when relay DB infra is standardized; correctness is proven
-    // by the live sponsored round-trip.
     async fn record_sponsorship_usage(&self, usage: SponsorshipUsage) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO sponsorship_usage
                 (user_address, quota_subject, chain_id, tx_hash, gas_used, gas_price, eth_spent)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (tx_hash) DO NOTHING
             "#,
+            usage.user_address.to_string(),
+            usage.quota_subject,
+            usage.chain_id as i64,
+            usage.tx_hash,
+            u256_to_numeric(usage.gas_used),
+            u256_to_numeric(usage.gas_price),
+            u256_to_numeric(usage.eth_spent),
         )
-        .bind(usage.user_address.to_string())
-        .bind(&usage.quota_subject)
-        .bind(usage.chain_id as i64)
-        .bind(&usage.tx_hash)
-        .bind(u256_to_numeric(usage.gas_used))
-        .bind(u256_to_numeric(usage.gas_price))
-        .bind(u256_to_numeric(usage.eth_spent))
         .execute(&self.pool)
         .await
         .map_err(eyre::Error::from)?;
@@ -1983,24 +1979,23 @@ impl StorageApi for PgStorage {
         chain_id: ChainId,
         window_hours: u64,
     ) -> Result<U256> {
-        let row = sqlx::query(
+        let row = sqlx::query!(
             r#"
-            SELECT COALESCE(SUM(eth_spent), 0) AS total
+            SELECT COALESCE(SUM(eth_spent), 0) AS "total!"
             FROM sponsorship_usage
             WHERE quota_subject = $1
               AND chain_id = $2
-              AND sponsored_at >= NOW() - (INTERVAL '1 hour' * $3)
+              AND sponsored_at >= NOW() - make_interval(hours => $3::int)
             "#,
+            quota_subject,
+            chain_id as i64,
+            window_hours as i32,
         )
-        .bind(quota_subject)
-        .bind(chain_id as i64)
-        .bind(window_hours as i32)
         .fetch_one(&self.pool)
         .await
         .map_err(eyre::Error::from)?;
 
-        let total: BigDecimal = row.try_get("total").map_err(eyre::Error::from)?;
-        Ok(numeric_to_u256(&total))
+        Ok(numeric_to_u256(&row.total))
     }
 
     async fn global_sponsored_wei_in_window(
@@ -2008,21 +2003,20 @@ impl StorageApi for PgStorage {
         chain_id: ChainId,
         window_hours: u64,
     ) -> Result<U256> {
-        let row = sqlx::query(
+        let row = sqlx::query!(
             r#"
-            SELECT COALESCE(SUM(eth_spent), 0) AS total
+            SELECT COALESCE(SUM(eth_spent), 0) AS "total!"
             FROM sponsorship_usage
             WHERE chain_id = $1
-              AND sponsored_at >= NOW() - (INTERVAL '1 hour' * $2)
+              AND sponsored_at >= NOW() - make_interval(hours => $2::int)
             "#,
+            chain_id as i64,
+            window_hours as i32,
         )
-        .bind(chain_id as i64)
-        .bind(window_hours as i32)
         .fetch_one(&self.pool)
         .await
         .map_err(eyre::Error::from)?;
 
-        let total: BigDecimal = row.try_get("total").map_err(eyre::Error::from)?;
-        Ok(numeric_to_u256(&total))
+        Ok(numeric_to_u256(&row.total))
     }
 }
