@@ -178,7 +178,10 @@ impl AssetDeficits {
     /// If the deficit becomes zero or negative, removes that asset deficit entirely.
     pub fn remove_fee_amount(&mut self, fee_token: Address, amount: U256) {
         self.0.retain_mut(|deficit| {
-            if deficit.address != Some(fee_token) {
+            // Native deficits carry `address: None` (see estimate_fee), while the
+            // native fee token is `Address::ZERO`; normalize so the native fee
+            // deficit is matched and stripped for sponsored zero-balance accounts.
+            if deficit.address.unwrap_or_default() != fee_token {
                 return true;
             }
 
@@ -814,6 +817,44 @@ mod tests {
     use super::*;
     use alloy::primitives::address;
     use serde_json::json;
+
+    #[test]
+    fn remove_fee_amount_strips_native_deficit() {
+        // Native fee deficit is stored with `address: None` (see estimate_fee),
+        // while the native fee token is `Address::ZERO`. Sponsorship must still
+        // match and strip it. Regression: `None != Some(ZERO)` left the native
+        // ETH fee deficit in the quote, so send was rejected as "has deficits".
+        let mut deficits = AssetDeficits(vec![
+            AssetDeficit {
+                address: None,
+                metadata: AssetMetadata {
+                    name: Some("Ether".to_string()),
+                    symbol: Some("ETH".to_string()),
+                    decimals: Some(18),
+                    uri: None,
+                },
+                required: U256::from(0x9aca22u64),
+                deficit: U256::from(0x9aca22u64),
+                fiat: None,
+            },
+            AssetDeficit {
+                address: Some(address!("0x1234567890123456789012345678901234567890")),
+                metadata: AssetMetadata { name: None, symbol: None, decimals: Some(6), uri: None },
+                required: U256::from(1000u64),
+                deficit: U256::from(1000u64),
+                fiat: None,
+            },
+        ]);
+
+        deficits.remove_fee_amount(Address::ZERO, U256::from(0x9aca22u64));
+
+        // Native fee deficit fully removed; the unrelated ERC20 deficit untouched.
+        assert_eq!(deficits.0.len(), 1);
+        assert_eq!(
+            deficits.0[0].address,
+            Some(address!("0x1234567890123456789012345678901234567890"))
+        );
+    }
 
     #[test]
     fn test_asset_diff_serialization() {
