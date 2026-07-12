@@ -28,7 +28,7 @@ use crate::{
     },
     types::{
         AssetDiffs, AssetUid, CreatableAccount, HistoricalPrice, HistoricalPriceKey, SignedCall,
-        rpc::BundleId,
+        SponsorshipUsage, rpc::BundleId,
     },
 };
 use alloy::{
@@ -1948,5 +1948,81 @@ impl StorageApi for PgStorage {
         }
 
         Ok(result)
+    }
+
+    // ponytail: these three use the unchecked `sqlx::query` (not `query!`) so the
+    // crate compiles without a live DB / `cargo sqlx prepare`. Upgrade to `query!`
+    // + prepared `.sqlx` when relay DB infra is standardized; correctness is proven
+    // by the live sponsored round-trip.
+    async fn record_sponsorship_usage(&self, usage: SponsorshipUsage) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO sponsorship_usage
+                (user_address, quota_subject, chain_id, tx_hash, gas_used, gas_price, eth_spent)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (tx_hash) DO NOTHING
+            "#,
+        )
+        .bind(usage.user_address.to_string())
+        .bind(&usage.quota_subject)
+        .bind(usage.chain_id as i64)
+        .bind(&usage.tx_hash)
+        .bind(u256_to_numeric(usage.gas_used))
+        .bind(u256_to_numeric(usage.gas_price))
+        .bind(u256_to_numeric(usage.eth_spent))
+        .execute(&self.pool)
+        .await
+        .map_err(eyre::Error::from)?;
+
+        Ok(())
+    }
+
+    async fn sponsored_wei_in_window(
+        &self,
+        quota_subject: &str,
+        chain_id: ChainId,
+        window_hours: u64,
+    ) -> Result<U256> {
+        let row = sqlx::query(
+            r#"
+            SELECT COALESCE(SUM(eth_spent), 0) AS total
+            FROM sponsorship_usage
+            WHERE quota_subject = $1
+              AND chain_id = $2
+              AND sponsored_at >= NOW() - (INTERVAL '1 hour' * $3)
+            "#,
+        )
+        .bind(quota_subject)
+        .bind(chain_id as i64)
+        .bind(window_hours as i32)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(eyre::Error::from)?;
+
+        let total: BigDecimal = row.try_get("total").map_err(eyre::Error::from)?;
+        Ok(numeric_to_u256(&total))
+    }
+
+    async fn global_sponsored_wei_in_window(
+        &self,
+        chain_id: ChainId,
+        window_hours: u64,
+    ) -> Result<U256> {
+        let row = sqlx::query(
+            r#"
+            SELECT COALESCE(SUM(eth_spent), 0) AS total
+            FROM sponsorship_usage
+            WHERE chain_id = $1
+              AND sponsored_at >= NOW() - (INTERVAL '1 hour' * $2)
+            "#,
+        )
+        .bind(chain_id as i64)
+        .bind(window_hours as i32)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(eyre::Error::from)?;
+
+        let total: BigDecimal = row.try_get("total").map_err(eyre::Error::from)?;
+        Ok(numeric_to_u256(&total))
     }
 }

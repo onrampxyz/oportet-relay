@@ -18,7 +18,7 @@ use crate::{
     },
     types::{
         AssetDiffs, CreatableAccount, HistoricalPrice, HistoricalPriceKey, SignedCall,
-        rpc::BundleId,
+        SponsorshipUsage, rpc::BundleId,
     },
 };
 use alloy::{
@@ -84,6 +84,16 @@ impl BundleWithStatusAndTime {
     }
 }
 
+/// In-memory sponsored-usage record (test backend only).
+#[derive(Debug, Clone)]
+struct InMemSponsorshipUsage {
+    quota_subject: String,
+    chain_id: ChainId,
+    eth_spent: U256,
+    /// Unix seconds when recorded; drives window filtering.
+    at: i64,
+}
+
 /// [`StorageApi`] implementation in-memory. Used for testing
 #[derive(Debug, Default)]
 pub struct InMemoryStorage {
@@ -107,6 +117,7 @@ pub struct InMemoryStorage {
     precalls: DashMap<(Address, ChainId, U256), SignedCall>,
     asset_diffs: DashMap<TxId, AssetDiffs>,
     historical_usd_prices: DashMap<HistoricalPriceKey, f64>,
+    sponsorship_usage: RwLock<Vec<InMemSponsorshipUsage>>,
 }
 
 impl InMemoryStorage {
@@ -940,6 +951,51 @@ impl StorageApi for InMemoryStorage {
         }
 
         Ok(result)
+    }
+
+    async fn record_sponsorship_usage(&self, usage: SponsorshipUsage) -> Result<()> {
+        self.sponsorship_usage.write().await.push(InMemSponsorshipUsage {
+            quota_subject: usage.quota_subject,
+            chain_id: usage.chain_id,
+            eth_spent: usage.eth_spent,
+            at: Utc::now().timestamp(),
+        });
+        Ok(())
+    }
+
+    async fn sponsored_wei_in_window(
+        &self,
+        quota_subject: &str,
+        chain_id: ChainId,
+        window_hours: u64,
+    ) -> Result<U256> {
+        let cutoff = Utc::now().timestamp() - (window_hours as i64) * 3600;
+        let total = self
+            .sponsorship_usage
+            .read()
+            .await
+            .iter()
+            .filter(|u| {
+                u.quota_subject == quota_subject && u.chain_id == chain_id && u.at >= cutoff
+            })
+            .fold(U256::ZERO, |acc, u| acc + u.eth_spent);
+        Ok(total)
+    }
+
+    async fn global_sponsored_wei_in_window(
+        &self,
+        chain_id: ChainId,
+        window_hours: u64,
+    ) -> Result<U256> {
+        let cutoff = Utc::now().timestamp() - (window_hours as i64) * 3600;
+        let total = self
+            .sponsorship_usage
+            .read()
+            .await
+            .iter()
+            .filter(|u| u.chain_id == chain_id && u.at >= cutoff)
+            .fold(U256::ZERO, |acc, u| acc + u.eth_spent);
+        Ok(total)
     }
 }
 

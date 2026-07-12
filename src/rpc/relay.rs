@@ -66,11 +66,12 @@ use crate::{
     error::{AuthError, KeysError, QuoteError, RelayError},
     price::PriceOracle,
     signers::DynSigner,
+    sponsorship::SponsorshipEvaluator,
     storage::{RelayStorage, StorageApi},
     transactions::{RelayTransaction, TransactionStatus},
     types::{
-        CreatableAccount, FeeEstimationContext, Intent, KeyWith712Signer, Orchestrator,
-        PartialIntent, Quote, Signature, SignedQuotes,
+        ChainSponsorshipConfig, CreatableAccount, FeeEstimationContext, Intent, KeyWith712Signer,
+        Orchestrator, PartialIntent, Quote, Signature, SignedQuotes, SponsorshipConfig,
         rpc::{
             AuthorizeKey, AuthorizeKeyResponse, BundleId, CallsStatus, CallsStatusCapabilities,
             GetKeysParameters, GetKeysResponse, PrepareCallsParameters, PrepareCallsResponse,
@@ -195,7 +196,11 @@ impl Relay {
         storage: RelayStorage,
         asset_info: AssetInfoServiceHandle,
         escrow_refund_threshold: u64,
+        sponsorship_config: SponsorshipConfig,
+        chain_sponsorship: std::collections::HashMap<ChainId, ChainSponsorshipConfig>,
     ) -> Self {
+        let sponsorship =
+            SponsorshipEvaluator::new(sponsorship_config, chain_sponsorship, storage.clone());
         let inner = RelayInner {
             contracts,
             chains,
@@ -207,6 +212,7 @@ impl Relay {
             storage,
             asset_info,
             escrow_refund_threshold,
+            sponsorship,
         };
         Self { inner: Arc::new(inner) }
     }
@@ -1756,9 +1762,34 @@ impl Relay {
             (requested_with_balances, None)
         } else {
             // Otherwise, we try to simulate intent as single chain first.
-            let quote_result = self
+            let mut quote_result = self
                 .build_single_chain_quote(request, identity, delegation_status, nonce, true)
                 .await?;
+
+            // Relay-side gas sponsorship (Model A): when policy approves and the client
+            // didn't supply its own fee_payer, zero the user's fee and drop the fee-token
+            // deficit so this stays a clean single-chain intent. The relay's funder pays
+            // the on-chain gas; usage is recorded post-receipt (see transactions::signer).
+            // ponytail: covers the single-chain path (user has the send asset, lacks only
+            // gas). Multichain-funded sponsorship would extend the fee_payer block below.
+            if request.capabilities.meta.fee_payer.is_none()
+                && self
+                    .inner
+                    .sponsorship
+                    .is_sponsored(identity.root_eoa, None, &request.calls, request.chain_id)
+                    .await?
+                && let Some(quote) = quote_result.1.quotes.first_mut()
+            {
+                quote
+                    .asset_deficits
+                    .remove_fee_amount(quote.intent.payment_token(), quote.fee_token_deficit);
+                quote.fee_token_deficit = U256::ZERO;
+                quote.intent = quote
+                    .intent
+                    .clone()
+                    .with_payer(Address::ZERO)
+                    .with_total_payment_max_amount(U256::ZERO);
+            }
 
             // Exit early if this is an unknown account.
             if delegation_status.is_unknown() {
@@ -3622,6 +3653,8 @@ pub(super) struct RelayInner {
     asset_info: AssetInfoServiceHandle,
     /// Escrow refund threshold in seconds
     escrow_refund_threshold: u64,
+    /// Gas-sponsorship policy evaluator.
+    sponsorship: SponsorshipEvaluator,
 }
 
 impl Relay {

@@ -6,7 +6,9 @@ use crate::{
     signers::DynSigner,
     storage::RelayStorage,
     transactions::{MIN_SIGNER_GAS, TOP_UP_MULTIPLIER},
-    types::{AssetUid, Assets, TransactionServiceHandles},
+    types::{
+        AssetUid, Assets, ChainSponsorshipConfig, SponsorshipConfig, TransactionServiceHandles,
+    },
 };
 use alloy::{
     eips::eip1559::Eip1559Estimation,
@@ -98,6 +100,12 @@ pub struct RelayConfig {
     pub secrets: SecretsConfig,
     /// Database URL.
     pub database_url: Option<String>,
+    /// Base gas-sponsorship policy.
+    #[serde(default)]
+    pub sponsorship: SponsorshipConfig,
+    /// Per-chain gas-sponsorship overrides, keyed by chain id.
+    #[serde(default)]
+    pub chain_sponsorship: std::collections::HashMap<ChainId, ChainSponsorshipConfig>,
 }
 
 impl RelayConfig {

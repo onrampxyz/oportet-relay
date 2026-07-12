@@ -17,7 +17,7 @@ use crate::{
     types::{
         AssetDiffs, IFunder, ORCHESTRATOR_NO_ERROR,
         OrchestratorContract::{self, IntentExecuted},
-        generate_cast_call_command,
+        SponsorshipUsage, generate_cast_call_command,
     },
 };
 use alloy::{
@@ -801,6 +801,31 @@ impl Signer {
             warn!(%tx_hash, err = %event.err, signer = %self.address(), chain_id = %self.chain_id, "intent failed on-chain");
             self.metrics.failed_intents.increment(1);
             return;
+        }
+
+        // Record sponsored gas usage: a zero-payment intent means the relay funder
+        // covered the on-chain gas (see rpc::relay build_quotes). Feed the per-subject
+        // quota + global circuit breaker. ponytail: zero-payment also holds for an
+        // external fee_payer, which we don't expose to clients, so it currently marks
+        // our own sponsorship. Address-mode subject; userId threading deferred.
+        if let RelayTransactionKind::Intent { quote, .. } = &tx.tx.kind
+            && quote.intent.total_payment_max_amount().is_zero()
+        {
+            let eoa = *quote.intent.eoa();
+            let gas_used = U256::from(receipt.gas_used);
+            let gas_price = U256::from(receipt.effective_gas_price);
+            let usage = SponsorshipUsage {
+                user_address: eoa,
+                quota_subject: eoa.to_string(),
+                chain_id: self.chain_id,
+                tx_hash: tx_hash.to_string(),
+                gas_used,
+                gas_price,
+                eth_spent: gas_used * gas_price,
+            };
+            if let Err(e) = self.storage.record_sponsorship_usage(usage).await {
+                warn!(%tx_hash, error = %e, "failed to record sponsorship usage");
+            }
         }
 
         if let Some(included_at_block) = receipt.block_number

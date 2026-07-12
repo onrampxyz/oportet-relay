@@ -61,6 +61,9 @@ pub use simulator::*;
 mod storage;
 pub use storage::*;
 
+mod sponsorship;
+pub use sponsorship::*;
+
 mod merkle;
 pub use merkle::*;
 

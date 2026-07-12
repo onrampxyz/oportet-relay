@@ -12,7 +12,7 @@ use crate::{
     },
     types::{
         AssetDiffs, CreatableAccount, HistoricalPrice, HistoricalPriceKey, Quote, SignedCall,
-        rpc::BundleId,
+        SponsorshipUsage, rpc::BundleId,
     },
 };
 use alloy::{
@@ -439,4 +439,24 @@ pub trait StorageApi: Debug + Send + Sync {
         &self,
         queries: Vec<HistoricalPriceKey>,
     ) -> Result<HashMap<HistoricalPriceKey, (u64, f64)>>;
+
+    /// Records a sponsored transaction into the usage ledger.
+    async fn record_sponsorship_usage(&self, usage: SponsorshipUsage) -> Result<()>;
+
+    /// Total sponsored spend (wei) for a quota subject on a chain within the last
+    /// `window_hours`. Drives the per-user rolling quota.
+    async fn sponsored_wei_in_window(
+        &self,
+        quota_subject: &str,
+        chain_id: ChainId,
+        window_hours: u64,
+    ) -> Result<U256>;
+
+    /// Total sponsored spend (wei) across all subjects on a chain within the last
+    /// `window_hours`. Drives the global circuit breaker.
+    async fn global_sponsored_wei_in_window(
+        &self,
+        chain_id: ChainId,
+        window_hours: u64,
+    ) -> Result<U256>;
 }

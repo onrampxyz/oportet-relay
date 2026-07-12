@@ -193,6 +193,8 @@ pub async fn try_spawn(config: RelayConfig, skip_diagnostics: bool) -> eyre::Res
             .as_ref()
             .map(|i| i.escrow_refund_threshold)
             .unwrap_or(ESCROW_REFUND_DURATION_SECS),
+        config.sponsorship,
+        config.chain_sponsorship,
     );
     // Setup account RPC module if email and onramp worker secret are configured
     let account_rpc = if let (Some(resend_api_key), Some(onramp_worker_secret)) =

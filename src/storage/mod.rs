@@ -21,7 +21,7 @@ use crate::{
     transactions::{PendingTransaction, PullGasState, RelayTransaction, TransactionStatus, TxId},
     types::{
         AssetDiffs, CreatableAccount, HistoricalPrice, HistoricalPriceKey, SignedCall,
-        rpc::BundleId,
+        SponsorshipUsage, rpc::BundleId,
     },
 };
 use alloy::{
@@ -448,6 +448,27 @@ impl StorageApi for RelayStorage {
         queries: Vec<HistoricalPriceKey>,
     ) -> api::Result<HashMap<HistoricalPriceKey, (u64, f64)>> {
         self.inner.read_historical_usd_prices(queries).await
+    }
+
+    async fn record_sponsorship_usage(&self, usage: SponsorshipUsage) -> api::Result<()> {
+        self.inner.record_sponsorship_usage(usage).await
+    }
+
+    async fn sponsored_wei_in_window(
+        &self,
+        quota_subject: &str,
+        chain_id: ChainId,
+        window_hours: u64,
+    ) -> api::Result<U256> {
+        self.inner.sponsored_wei_in_window(quota_subject, chain_id, window_hours).await
+    }
+
+    async fn global_sponsored_wei_in_window(
+        &self,
+        chain_id: ChainId,
+        window_hours: u64,
+    ) -> api::Result<U256> {
+        self.inner.global_sponsored_wei_in_window(chain_id, window_hours).await
     }
 }
 

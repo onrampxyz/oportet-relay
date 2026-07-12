@@ -21,6 +21,7 @@ pub mod rpc;
 pub mod serde;
 pub mod signers;
 pub mod spawn;
+pub mod sponsorship;
 pub mod storage;
 pub mod transactions;
 pub mod transport;
