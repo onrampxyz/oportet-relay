@@ -88,6 +88,12 @@ pub struct RelayTransaction {
     pub trace_context: Context,
     /// Time at which we've received this transaction.
     pub received_at: DateTime<Utc>,
+    /// Gas-sponsorship quota subject (address or verified user id) this tx is
+    /// recorded against, resolved at send time per the chain's policy. `None`
+    /// for non-sponsored txs (and legacy rows). Read by the confirmed-metrics
+    /// recorder so user-mode quota keys the same subject the decision counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_subject: Option<String>,
 }
 
 impl RelayTransaction {
@@ -106,7 +112,14 @@ impl RelayTransaction {
             },
             trace_context: Context::current(),
             received_at: Utc::now(),
+            quota_subject: None,
         }
+    }
+
+    /// Set the gas-sponsorship quota subject this tx is recorded against.
+    pub fn with_quota_subject(mut self, quota_subject: Option<String>) -> Self {
+        self.quota_subject = quota_subject;
+        self
     }
 
     /// Create a new [`RelayTransaction`] for an internal transaction.
@@ -138,6 +151,7 @@ impl RelayTransaction {
             },
             trace_context: Context::current(),
             received_at: Utc::now(),
+            quota_subject: None,
         }
     }
 

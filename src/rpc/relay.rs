@@ -132,7 +132,11 @@ pub trait RelayApi {
     ) -> RpcResult<PrepareUpgradeAccountResponse>;
 
     /// Send a signed call bundle.
-    #[method(name = "sendPreparedCalls")]
+    ///
+    /// `with_extensions` exposes the verified [`VerifiedSub`] so a sponsored
+    /// send can be recorded against the user (not just the address) — see the
+    /// confirmed-metrics recorder.
+    #[method(name = "sendPreparedCalls", with_extensions)]
     async fn send_prepared_calls(
         &self,
         parameters: SendPreparedCallsParameters,
@@ -721,6 +725,7 @@ impl Relay {
         quotes: SignedQuotes,
         capabilities: SendPreparedCallsCapabilities,
         signature: Bytes,
+        user_id: Option<&str>,
     ) -> RpcResult<BundleId> {
         // if we do **not** get an error here, then the quote ttl must be in the past, which means
         // it is expired
@@ -748,9 +753,10 @@ impl Relay {
 
         // Use multichain workflow if there's a merkle root OR a fee_payer quote
         if quotes.ty().multi_chain_root.is_none() && quotes.ty().fee_payer_quote.is_none() {
-            self.send_single_chain_intent(&quotes, capabilities, signature, bundle_id).await
+            self.send_single_chain_intent(&quotes, capabilities, signature, bundle_id, user_id)
+                .await
         } else {
-            self.send_multichain_intents(quotes, capabilities, signature, bundle_id).await
+            self.send_multichain_intents(quotes, capabilities, signature, bundle_id, user_id).await
         }
     }
 
@@ -761,6 +767,7 @@ impl Relay {
         mut quote: Quote,
         capabilities: SendPreparedCallsCapabilities,
         signature: Bytes,
+        user_id: Option<&str>,
     ) -> RpcResult<RelayTransaction> {
         let chain_id = quote.chain_id;
         // todo: chain support should probably be checked before we send txs
@@ -860,7 +867,21 @@ impl Relay {
         // set our payment recipient
         quote.intent = quote.intent.with_payment_recipient(self.inner.fee_recipient);
 
-        let tx = RelayTransaction::new(quote, authorization_list, eip712_digest);
+        // A zero payment means the sponsorship policy zeroed the fee at prepare
+        // time (Model A). Record which subject that sponsorship counts against,
+        // per the chain's policy, so the confirmed-metrics recorder keys the
+        // usage ledger the same way the decision did (address or verified user).
+        let quota_subject = quote
+            .intent
+            .total_payment_max_amount()
+            .is_zero()
+            .then(|| {
+                self.inner.sponsorship.resolve_quota_subject(*quote.intent.eoa(), user_id, chain_id)
+            })
+            .flatten();
+
+        let tx = RelayTransaction::new(quote, authorization_list, eip712_digest)
+            .with_quota_subject(quota_subject);
         self.inner.storage.add_bundle_tx(bundle_id, tx.id).await?;
 
         Ok(tx)
@@ -1729,6 +1750,17 @@ impl Relay {
         delegation_status: &DelegationStatus,
         user_id: Option<&str>,
     ) -> RpcResult<(AssetDiffResponse, Quotes)> {
+        // Gas-sponsorship decision (Model A), evaluated once and applied to BOTH
+        // the single-chain and multichain-funded paths below: when the policy
+        // approves and the client supplied no fee_payer, the user's fee is zeroed
+        // and the relay funder pays the on-chain gas.
+        let sponsored = request.capabilities.meta.fee_payer.is_none()
+            && self
+                .inner
+                .sponsorship
+                .is_sponsored(identity.root_eoa, user_id, &request.calls, request.chain_id)
+                .await?;
+
         let requested_with_balances = if !request.capabilities.required_funds.is_empty() {
             let requested_balances = self
                 .get_assets(GetAssetsParameters::for_assets_on_chains(
@@ -1774,20 +1806,13 @@ impl Relay {
                 .build_single_chain_quote(request, identity, delegation_status, nonce, true)
                 .await?;
 
-            // Relay-side gas sponsorship (Model A): when policy approves and the client
-            // didn't supply its own fee_payer, zero the user's fee and drop the fee-token
-            // deficit so this stays a clean single-chain intent. The relay's funder pays
-            // the on-chain gas; usage is recorded post-receipt (see transactions::signer).
-            // ponytail: covers the single-chain path (user has the send asset, lacks only
-            // gas). Multichain-funded sponsorship would extend the fee_payer block below.
-            if request.capabilities.meta.fee_payer.is_none()
-                && self
-                    .inner
-                    .sponsorship
-                    .is_sponsored(identity.root_eoa, user_id, &request.calls, request.chain_id)
-                    .await?
-                && let Some(quote) = quote_result.1.quotes.first_mut()
-            {
+            // Relay-side gas sponsorship (Model A): zero the user's fee and drop the
+            // fee-token deficit so this stays a clean single-chain intent. The relay's
+            // funder pays the on-chain gas; usage is recorded post-receipt (see
+            // transactions::signer). If the user also lacks the send asset, the fee-token
+            // deficit is already cleared here so only the send asset is sourced below, and
+            // the multichain output intent is re-zeroed after re-simulation.
+            if sponsored && let Some(quote) = quote_result.1.quotes.first_mut() {
                 quote
                     .asset_deficits
                     .remove_fee_amount(quote.intent.payment_token(), quote.fee_token_deficit);
@@ -2002,8 +2027,10 @@ impl Relay {
         }
 
         // Include the fee token into the filter if we will need to source the fee from the user as
-        // well.
+        // well. Skip when sponsored: the relay funder pays the fee, so it is never sourced from
+        // the user's other chains.
         if request.capabilities.meta.fee_payer.is_none()
+            && !sponsored
             && !output_quote.fee_token_deficit.is_zero()
             && !requested_with_balance.iter().any(|(asset, _)| asset.address == fee_token)
         {
@@ -2055,8 +2082,9 @@ impl Relay {
                 .collect::<Vec<_>>();
 
             // If the user is the one paying for fees, we need to add that fee cost to the requested
-            // funds request
-            if request.capabilities.meta.fee_payer.is_none() {
+            // funds request. Skip when sponsored: the relay funder covers the fee, so it is not
+            // sourced from the user.
+            if request.capabilities.meta.fee_payer.is_none() && !sponsored {
                 if let Some(entry) =
                     requested_funds.iter_mut().find(|(address, _)| address.address() == fee_token)
                 {
@@ -2157,6 +2185,25 @@ impl Relay {
                 )
                 .await?;
             output_quote = new_quote;
+
+            // Multichain-funded sponsorship (Model A): the re-simulated output intent
+            // re-added the fee, so zero it here. Combined with excluding the fee from the
+            // sourced funds above, only the send asset is pulled from the user's other
+            // chains; the relay funder pays the on-chain gas. Zeroing the fee-token
+            // deficit also satisfies the fee-covered exit condition below, so we settle
+            // the funding intents against the zeroed output intent.
+            if sponsored {
+                output_quote.asset_deficits.remove_fee_amount(
+                    output_quote.intent.payment_token(),
+                    output_quote.fee_token_deficit,
+                );
+                output_quote.fee_token_deficit = U256::ZERO;
+                output_quote.intent = output_quote
+                    .intent
+                    .clone()
+                    .with_payer(Address::ZERO)
+                    .with_total_payment_max_amount(U256::ZERO);
+            }
 
             // If the existing balance on the destination chain, plus any funds we've sourced, minus
             // the requested amount of funds (and the fee if the requested asset is also the fee
@@ -2344,6 +2391,7 @@ impl Relay {
         capabilities: SendPreparedCallsCapabilities,
         signature: Bytes,
         bundle_id: BundleId,
+        user_id: Option<&str>,
     ) -> RpcResult<BundleId> {
         // send intent
         let tx = self
@@ -2353,6 +2401,7 @@ impl Relay {
                 quotes.ty().quotes.first().unwrap().clone(),
                 capabilities,
                 signature,
+                user_id,
             )
             .await?;
 
@@ -2383,9 +2432,11 @@ impl Relay {
         capabilities: SendPreparedCallsCapabilities,
         signature: Bytes,
         bundle_id: BundleId,
+        user_id: Option<&str>,
     ) -> RpcResult<BundleId> {
-        let bundle =
-            self.create_interop_bundle(bundle_id, &mut quotes, &capabilities, signature).await?;
+        let bundle = self
+            .create_interop_bundle(bundle_id, &mut quotes, &capabilities, signature, user_id)
+            .await?;
 
         let interop = self.inner.chains.interop().ok_or(QuoteError::MultichainDisabled)?;
         interop.send_bundle(bundle).await?;
@@ -2400,6 +2451,7 @@ impl Relay {
         quotes: &mut SignedQuotes,
         capabilities: &SendPreparedCallsCapabilities,
         signature: Bytes,
+        user_id: Option<&str>,
     ) -> Result<InteropBundle, RelayError> {
         let mut intents = Intents::new(
             quotes
@@ -2433,7 +2485,7 @@ impl Relay {
                 signature.clone()
             };
 
-            self.prepare_tx(bundle_id, quote.clone(), capabilities.clone(), signature)
+            self.prepare_tx(bundle_id, quote.clone(), capabilities.clone(), signature, user_id)
                 .await
                 .map(|tx| (idx, tx))
                 .map_err(|e| RelayError::InternalError(e.into()))
@@ -2456,6 +2508,7 @@ impl Relay {
                     (**fee_payer_quote).clone(),
                     Default::default(),
                     capabilities.fee_signature.clone(),
+                    user_id,
                 )
                 .await
                 .map_err(|e| RelayError::InternalError(e.into()))?,
@@ -2920,8 +2973,12 @@ impl RelayApiServer for Relay {
 
     async fn send_prepared_calls(
         &self,
+        ext: &Extensions,
         request: SendPreparedCallsParameters,
     ) -> RpcResult<SendPreparedCallsResponse> {
+        // Verified by the JWT auth layer; used only to key user-mode sponsorship
+        // quota when this send is sponsored. Absent = address-mode.
+        let user_id = ext.get::<VerifiedSub>().map(|sub| sub.0.as_str());
         let SendPreparedCallsParameters { capabilities, context, signature, key } = request;
 
         // compute real signature
@@ -2958,12 +3015,14 @@ impl RelayApiServer for Relay {
                     return Err(AuthError::UnknownAccountQuote.into());
                 }
 
-                self.send_intents(*quotes, capabilities, signature).await.inspect_err(|err| {
-                    error!(
-                        %err,
-                        "Failed to submit call bundle transaction.",
-                    );
-                })?
+                self.send_intents(*quotes, capabilities, signature, user_id).await.inspect_err(
+                    |err| {
+                        error!(
+                            %err,
+                            "Failed to submit call bundle transaction.",
+                        );
+                    },
+                )?
             }
             PrepareCallsContext::PreCall(PreCallContext { mut call, chain_id }) => {
                 let eoa = call.eoa;

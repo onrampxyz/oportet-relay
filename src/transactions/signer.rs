@@ -807,16 +807,19 @@ impl Signer {
         // covered the on-chain gas (see rpc::relay build_quotes). Feed the per-subject
         // quota + global circuit breaker. ponytail: zero-payment also holds for an
         // external fee_payer, which we don't expose to clients, so it currently marks
-        // our own sponsorship. Address-mode subject; userId threading deferred.
+        // our own sponsorship. The quota subject was resolved at send time per the
+        // chain's policy (address or verified user); fall back to the address for
+        // legacy txs with no stored subject.
         if let RelayTransactionKind::Intent { quote, .. } = &tx.tx.kind
             && quote.intent.total_payment_max_amount().is_zero()
         {
             let eoa = *quote.intent.eoa();
+            let quota_subject = tx.tx.quota_subject.clone().unwrap_or_else(|| eoa.to_string());
             let gas_used = U256::from(receipt.gas_used);
             let gas_price = U256::from(receipt.effective_gas_price);
             let usage = SponsorshipUsage {
                 user_address: eoa,
-                quota_subject: eoa.to_string(),
+                quota_subject,
                 chain_id: self.chain_id,
                 tx_hash: tx_hash.to_string(),
                 gas_used,

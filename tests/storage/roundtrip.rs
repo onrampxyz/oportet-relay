@@ -221,6 +221,7 @@ impl Fixtures {
             },
             trace_context: Context::current(),
             received_at: Utc::now(),
+            quota_subject: None,
         };
 
         let pending_id = B256::with_last_byte(2);

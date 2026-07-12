@@ -53,6 +53,20 @@ impl SponsorshipEvaluator {
         }
     }
 
+    /// The subject a sponsored tx on `chain_id` should be recorded against,
+    /// resolved through that chain's policy. Used at send time so the usage
+    /// ledger keys the SAME subject the decision counted (address or verified
+    /// user). `None` under `quota_key = user` with no verified user — in which
+    /// case the tx would not have been sponsored, so nothing is recorded.
+    pub fn resolve_quota_subject(
+        &self,
+        eoa: Address,
+        user_id: Option<&str>,
+        chain_id: ChainId,
+    ) -> Option<String> {
+        Self::quota_subject(&self.config_for(chain_id), eoa, user_id)
+    }
+
     /// Whether every call targets a whitelisted contract or method. Empty call
     /// lists are never whitelisted (fail-closed).
     fn is_whitelisted(cfg: &SponsorshipConfig, calls: &[Call]) -> bool {
