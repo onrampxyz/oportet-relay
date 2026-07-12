@@ -36,8 +36,10 @@ crates/testing/resources/**/cache/*
 # Environment files
 .env
 
-# Relay configuration
+# Relay configuration (generated at boot / may hold secrets)
 relay.yaml
+# ...except the checked-in, secret-free Railway deploy config
+!deploy/railway/relay.yaml
 
 # Scratchpad
 _

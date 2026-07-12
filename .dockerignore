@@ -29,3 +29,5 @@
 !/migrations
 # include
 !/.sqlx
+# include Railway deploy config (baked relay.yaml)
+!/deploy

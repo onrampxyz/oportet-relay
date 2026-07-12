@@ -1,0 +1,56 @@
+# Railway deploy config for the Onramp gas-sponsorship relay (testnet).
+#
+# Baked into the image and loaded with `--config-only`, so this file is
+# authoritative for everything EXCEPT secrets, which are read from the env at
+# boot (RELAY_MNEMONIC, RELAY_FUNDER_SIGNER_KEY, RELAY_FUNDER_OWNER_KEY,
+# RELAY_DB_URL). NEVER put a secret in this file — it ships in the image.
+#
+# Contract addresses = our deployed set on Base Sepolia (proven in Slice 2/4).
+
+server:
+  address: "0.0.0.0"
+  port: 9119
+  metrics_port: 9000
+  max_connections: 100
+
+fee_recipient: "0x3824525F5913F1908ce62ea5532C9757Bf3E25A7"
+orchestrator: "0x6A9Aa49c955BF766b44979A9e375Bd83e2a8f485"
+delegation_proxy: "0x9cEC2E86E7Cb43cB56350d8f928DFC194727E096"
+simulator: "0x3006de101E96e85272d5B5Ad07A9738fa7678008"
+funder: "0xFC4Cd2DCfF0F1e2781BF9fE7F48378843E176A2e"
+escrow: "0xCd075ceb5Cd463a9233a8085fc915767139F655c"
+
+quote:
+  constantRate: 1.0
+  gas:
+    intentBuffer: 0
+    txBuffer: 0
+  ttl: 5
+  rateTtl: 300
+
+# Gas-sponsorship policy. sponsor_all zeroes every eligible intent's fee (the
+# funder pays gas). Ceiling fields are required (not serde-defaulted). Flip
+# sponsor_all off + set quota_key: user for JWT-gated per-user quota.
+sponsorship:
+  sponsor_all: true
+  circuit_breaker_wei: "1000000000000000000"
+  per_user_wei: "10000000000000000"
+  window_hours: 24
+
+# Better Auth JWKS for verifying user bearer tokens (user-mode quota). Harmless
+# under sponsor_all: an unverifiable/absent bearer just falls back to
+# address-mode. Points at production; the jwt() plugin must be live there for
+# user-mode to actually key by user.
+auth:
+  jwks_url: "https://onramp.xyz/api/auth/jwks"
+
+chains:
+  84532:
+    endpoint: "https://sepolia.base.org"
+    sim_mode: trace
+    assets:
+      ethereum:
+        address: "0x0000000000000000000000000000000000000000"
+        fee_token: true
+    signers:
+      num_signers: 3
