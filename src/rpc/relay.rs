@@ -54,6 +54,7 @@ use itertools::Itertools;
 use jsonrpsee::{
     core::{RpcResult, async_trait},
     proc_macros::rpc,
+    server::Extensions,
 };
 use opentelemetry::trace::SpanKind;
 use std::{cmp, collections::HashMap, sync::Arc, time::SystemTime};
@@ -61,6 +62,7 @@ use tokio::try_join;
 use tracing::{Instrument, Level, debug, error, info, instrument, span, warn};
 
 use crate::{
+    auth::VerifiedSub,
     chains::{Chain, Chains},
     config::QuoteConfig,
     error::{AuthError, KeysError, QuoteError, RelayError},
@@ -112,7 +114,11 @@ pub trait RelayApi {
     async fn get_assets(&self, parameters: GetAssetsParameters) -> RpcResult<GetAssetsResponse>;
 
     /// Prepares a call bundle for a user.
-    #[method(name = "prepareCalls")]
+    ///
+    /// `with_extensions` exposes the request `Extensions`, into which the JWT
+    /// auth layer inserts the verified [`VerifiedSub`] used for user-tied
+    /// sponsorship quota.
+    #[method(name = "prepareCalls", with_extensions)]
     async fn prepare_calls(
         &self,
         parameters: PrepareCallsParameters,
@@ -1309,6 +1315,7 @@ impl Relay {
     async fn prepare_calls_inner(
         &self,
         mut request: PrepareCallsParameters,
+        user_id: Option<&str>,
     ) -> RpcResult<PrepareCallsResponse> {
         // Checks calls and precall calls in the request
         request.check_calls(self.contracts().delegation_implementation())?;
@@ -1377,7 +1384,7 @@ impl Relay {
             let identity = IdentityParameters::new(request.key.as_ref(), eoa);
 
             let (asset_diffs, quotes) =
-                self.build_quotes(&request, &identity, nonce, delegation_status).await?;
+                self.build_quotes(&request, &identity, nonce, delegation_status, user_id).await?;
 
             // Compute EIP-712 digest for fee_payer quote if present
             let fee_payer_digest = quotes
@@ -1720,6 +1727,7 @@ impl Relay {
         identity: &IdentityParameters,
         nonce: U256,
         delegation_status: &DelegationStatus,
+        user_id: Option<&str>,
     ) -> RpcResult<(AssetDiffResponse, Quotes)> {
         let requested_with_balances = if !request.capabilities.required_funds.is_empty() {
             let requested_balances = self
@@ -1776,7 +1784,7 @@ impl Relay {
                 && self
                     .inner
                     .sponsorship
-                    .is_sponsored(identity.root_eoa, None, &request.calls, request.chain_id)
+                    .is_sponsored(identity.root_eoa, user_id, &request.calls, request.chain_id)
                     .await?
                 && let Some(quote) = quote_result.1.quotes.first_mut()
             {
@@ -2842,10 +2850,15 @@ impl RelayApiServer for Relay {
 
     async fn prepare_calls(
         &self,
+        ext: &Extensions,
         request: PrepareCallsParameters,
     ) -> RpcResult<PrepareCallsResponse> {
         tracing::Span::current().record("eth.chain_id", request.chain_id);
-        self.prepare_calls_inner(request).await
+        // Verified by the JWT auth layer (spawn.rs); absent when unauthenticated
+        // or when no `auth` config is set, in which case quota falls back to
+        // address-mode.
+        let user_id = ext.get::<VerifiedSub>().map(|sub| sub.0.as_str());
+        self.prepare_calls_inner(request, user_id).await
     }
 
     async fn prepare_upgrade_account(

@@ -106,6 +106,19 @@ pub struct RelayConfig {
     /// Per-chain gas-sponsorship overrides, keyed by chain id.
     #[serde(default)]
     pub chain_sponsorship: std::collections::HashMap<ChainId, ChainSponsorshipConfig>,
+    /// Optional Better Auth JWT verification. When set, the relay verifies
+    /// `Authorization: Bearer` tokens against the app's JWKS so sponsorship
+    /// quota can be keyed by user id. Absent = address-mode quota only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AuthConfig>,
+}
+
+/// Better Auth JWT verification config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthConfig {
+    /// JWKS endpoint of the app's auth server, e.g.
+    /// `https://onramp.xyz/api/auth/jwks`.
+    pub jwks_url: String,
 }
 
 impl RelayConfig {

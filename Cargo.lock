@@ -5482,6 +5482,7 @@ dependencies = [
  "dashmap",
  "derive_more",
  "dotenvy",
+ "ed25519-dalek",
  "eyre",
  "futures",
  "futures-util",

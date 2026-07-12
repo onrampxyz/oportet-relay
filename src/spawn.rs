@@ -1,6 +1,7 @@
 //! Relay spawn utilities.
 use crate::{
     asset::AssetInfoService,
+    auth::{JwksCache, JwtAuthLayer},
     chains::Chains,
     cli::Args,
     config::RelayConfig,
@@ -237,7 +238,13 @@ pub async fn try_spawn(config: RelayConfig, skip_diagnostics: bool) -> eyre::Res
     let cors = CorsLayer::new()
         .allow_methods(AllowMethods::any())
         .allow_origin(AllowOrigin::any())
-        .allow_headers([header::CONTENT_TYPE]);
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+
+    // Verifies Better Auth bearer JWTs (when `auth` is configured) and threads
+    // the verified user id into request extensions for user-tied sponsorship
+    // quota. No `auth` config = pass-through (address-mode quota).
+    let jwt_auth =
+        JwtAuthLayer::new(config.auth.as_ref().map(|auth| JwksCache::new(auth.jwks_url.clone())));
 
     // start server
     let server = Server::builder()
@@ -250,6 +257,7 @@ pub async fn try_spawn(config: RelayConfig, skip_diagnostics: bool) -> eyre::Res
         .set_http_middleware(
             ServiceBuilder::new()
                 .layer(cors)
+                .layer(jwt_auth)
                 .layer(ProxyGetRequestLayer::new([
                     ("/health", "health"),
                     ("/live", "live"),
