@@ -59,5 +59,9 @@ COPY --from=builder /app/relay /usr/local/bin
 COPY deploy/railway/relay.yaml /app/relay.yaml
 
 EXPOSE 9119
-ENTRYPOINT ["/usr/local/bin/relay"]
-CMD ["--config", "/app/relay.yaml", "--config-only"]
+
+# Railway runs the image ENTRYPOINT but drops the Dockerfile CMD when the service
+# has no explicit start command, so the relay booted with zero args and crashed
+# on the required --orchestrator/... flags. Fold the config args into ENTRYPOINT
+# so the image always boots in --config-only mode regardless of platform.
+ENTRYPOINT ["/usr/local/bin/relay", "--config", "/app/relay.yaml", "--config-only"]
