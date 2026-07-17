@@ -130,7 +130,11 @@ impl StressAccount {
                     revoke_keys: vec![],
                     pre_calls: vec![],
                     pre_call: false,
-                    required_funds: vec![RequiredAsset::new(fee_token, transfer_amount)],
+                    // why: non-empty required_funds flags the intent as multichain and
+                    // routes it through the interop/settler service. Our single-chain relay
+                    // has interop off (settler = Slice 6), and the account is pre-funded on
+                    // the destination chain, so no cross-chain sourcing is needed — leave empty.
+                    required_funds: vec![],
                 },
                 state_overrides: Default::default(),
                 balance_overrides: Default::default(),
