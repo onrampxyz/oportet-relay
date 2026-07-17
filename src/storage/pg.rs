@@ -401,7 +401,10 @@ struct BridgeTransferRow {
 }
 
 fn numeric_to_u256(value: &BigDecimal) -> U256 {
-    value.round(0).into_bigint_and_scale().0.try_into().unwrap()
+    // why: locked/sponsored aggregates are non-negative quantities; a stored value
+    // should never be negative, but if one ever is (e.g. legacy corrupt row), floor
+    // to 0 instead of panicking on the unsigned conversion.
+    value.round(0).into_bigint_and_scale().0.try_into().unwrap_or(U256::ZERO)
 }
 
 fn u256_to_numeric(value: U256) -> BigDecimal {
@@ -1197,12 +1200,17 @@ impl StorageApi for PgStorage {
         .map_err(eyre::Error::from)?;
 
         for row in rows {
-            sqlx::query!(
-                "update locked_liquidity set amount = amount - $1 where chain_id = $2 and asset_address = $3",
-                row.amount,
-                chain_id as i64,
-                row.asset_address.as_slice(),
+            // why: a release must never drive locked liquidity below zero. Over-unlock
+            // (an unlock whose lock rolled back) has to floor at 0, not underflow — the
+            // lock-decision math (try_lock_liquidity_with) and numeric_to_u256 both
+            // assume amount >= 0. Runtime query() so this GREATEST change needs no
+            // offline .sqlx regeneration for the config-only Railway build.
+            sqlx::query(
+                "update locked_liquidity set amount = GREATEST(amount - $1, 0::numeric) where chain_id = $2 and asset_address = $3",
             )
+            .bind(row.amount)
+            .bind(chain_id as i64)
+            .bind(row.asset_address.as_slice())
             .execute(&mut *tx)
             .await
             .map_err(eyre::Error::from)?;
@@ -1491,7 +1499,7 @@ impl StorageApi for PgStorage {
     ) -> Result<()> {
         let mut tx = self.pool.begin().await.map_err(eyre::Error::from)?;
 
-        sqlx::query!(
+        let updated = sqlx::query!(
             r#"
             UPDATE pull_gas_transactions
             SET state = $2,
@@ -1505,7 +1513,15 @@ impl StorageApi for PgStorage {
         .await
         .map_err(eyre::Error::from)?;
 
-        self.unlock_liquidity_with((chain_id, Address::ZERO), amount, at, &mut *tx).await?;
+        // why: only release liquidity that was actually locked. The lock commits
+        // atomically with the pull_gas row (lock_liquidity_for_pull_gas), so a missing
+        // row (rows_affected == 0) means the lock rolled back — e.g. a nonce-race
+        // duplicate-key abort — and there is nothing to unlock. Unlocking anyway would
+        // queue a pending_unlock with no matching lock and drive locked_liquidity
+        // negative on prune.
+        if updated.rows_affected() > 0 {
+            self.unlock_liquidity_with((chain_id, Address::ZERO), amount, at, &mut *tx).await?;
+        }
 
         tx.commit().await.map_err(eyre::Error::from)?;
         Ok(())
