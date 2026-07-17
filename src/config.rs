@@ -386,8 +386,18 @@ impl RelayConfig {
         let path = path.as_ref();
         let file = std::fs::File::open(path)
             .wrap_err_with(|| format!("failed to read config file: {}", path.display()))?;
-        let config = serde_yaml::from_reader(&file)
+        let mut config: Self = serde_yaml::from_reader(&file)
             .wrap_err_with(|| format!("failed to parse config file: {}", path.display()))?;
+        // Per-chain RPC endpoint override from env RPC_<chainId>, so keyed provider
+        // URLs (secrets) stay in the runtime env instead of baked into the image;
+        // the yaml carries only a public fallback endpoint.
+        for (chain, chain_config) in config.chains.iter_mut() {
+            if let Ok(url) = std::env::var(format!("RPC_{}", chain.id())) {
+                chain_config.endpoint = url
+                    .parse()
+                    .wrap_err_with(|| format!("invalid RPC_{} endpoint URL from env", chain.id()))?;
+            }
+        }
         Ok(config)
     }
 

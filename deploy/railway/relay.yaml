@@ -1,11 +1,14 @@
-# Railway deploy config for the Onramp gas-sponsorship relay (testnet).
+# Railway deploy config for the Onramp gas-sponsorship relay (testnet + mainnet).
 #
 # Baked into the image and loaded with `--config-only`, so this file is
 # authoritative for everything EXCEPT secrets, which are read from the env at
 # boot (RELAY_MNEMONIC, RELAY_FUNDER_SIGNER_KEY, RELAY_FUNDER_OWNER_KEY,
 # RELAY_DB_URL). NEVER put a secret in this file — it ships in the image.
 #
-# Contract addresses = our deployed set on Base Sepolia (proven in Slice 2/4).
+# Contract addresses are GLOBAL (one uniform CREATE2 set, identical on every
+# chain — testnet + mainnet). Per-chain `endpoint` values here are PUBLIC
+# fallbacks; keyed provider URLs are injected at boot from env RPC_<chainId>
+# (see config.rs load_from_file), so no keyed RPC ever lands in the image.
 
 server:
   address: "0.0.0.0"
@@ -59,6 +62,40 @@ chains:
   11155931:
     endpoint: "https://indexing.testnet.riselabs.xyz"
     sim_mode: trace
+    assets:
+      ethereum:
+        address: "0x0000000000000000000000000000000000000000"
+        fee_token: true
+    signers:
+      num_signers: 3
+  # --- Mainnet (uniform contract set deployed + funded on all three, 2026-07-17).
+  # endpoint below is a public fallback; RPC_<chainId> env overrides with the keyed
+  # provider URL at boot. LZ interop is configured on-chain but not yet enabled here.
+  # Base mainnet.
+  8453:
+    endpoint: "https://mainnet.base.org"
+    sim_mode: simulatev1
+    assets:
+      ethereum:
+        address: "0x0000000000000000000000000000000000000000"
+        fee_token: true
+    signers:
+      num_signers: 3
+  # Polygon mainnet. Native gas asset is POL.
+  137:
+    endpoint: "https://polygon-rpc.com"
+    sim_mode: simulatev1
+    assets:
+      pol:
+        address: "0x0000000000000000000000000000000000000000"
+        fee_token: true
+    signers:
+      num_signers: 3
+  # Rise mainnet. Keyed RPC supports eth_simulateV1 (probed), so simulatev1 like
+  # the other mainnets; only the public-RPC testnets fall back to trace.
+  4153:
+    endpoint: "https://rpc.risechain.com"
+    sim_mode: simulatev1
     assets:
       ethereum:
         address: "0x0000000000000000000000000000000000000000"
