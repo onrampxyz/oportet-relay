@@ -28,7 +28,9 @@ quote:
   gas:
     intentBuffer: 0
     txBuffer: 0
-  ttl: 5
+  # 60s: a passkey-signed flow (biometric/PIN prompt between prepareCalls and
+  # sendPreparedCalls) cannot redeem a quote inside the 5s default.
+  ttl: 60
   rateTtl: 300
 
 # Gas-sponsorship policy. sponsor_all zeroes every eligible intent's fee (the
