@@ -1,7 +1,7 @@
 //! Relay spawn utilities.
 use crate::{
     asset::AssetInfoService,
-    auth::{JwksCache, JwtAuthLayer},
+    auth::{DevBypass, JwksCache, JwtAuthLayer},
     chains::Chains,
     cli::Args,
     config::RelayConfig,
@@ -77,6 +77,18 @@ pub async fn try_spawn_with_args(args: Args, config_path: &Path) -> eyre::Result
             .wrap_err("Missing environment variable RELAY_FUNDER_SIGNER_KEY")?;
         config.database_url = std::env::var("RELAY_DB_URL").ok();
 
+        // LOCAL-ONLY dev sponsorship escape hatch, opt-in via env. Requires an
+        // `[auth]` block. A boot assertion (`assert_dev_hatch_safe`) refuses to
+        // start if this ends up set on a mainnet relay.
+        if let Ok(dev_key) = std::env::var("RELAY_DEV_API_KEY") {
+            match config.auth.as_mut() {
+                Some(auth) => auth.dev_api_key = Some(dev_key),
+                None => warn!(
+                    "RELAY_DEV_API_KEY is set but no [auth] config is present; dev escape hatch ignored"
+                ),
+            }
+        }
+
         if let (Ok(account_sid), Ok(auth_token), Ok(verify_service_sid)) = (
             std::env::var("TWILIO_ACCOUNT_SID"),
             std::env::var("TWILIO_AUTH_TOKEN"),
@@ -101,6 +113,10 @@ pub async fn try_spawn_with_args(args: Args, config_path: &Path) -> eyre::Result
 
 /// Spawns the relay service using the provided [`RelayConfig`].
 pub async fn try_spawn(config: RelayConfig, skip_diagnostics: bool) -> eyre::Result<RelayHandle> {
+    // Fail-closed guard: the local dev sponsorship escape hatch must never run
+    // on a relay that serves a mainnet chain. Checked before anything else.
+    assert_dev_hatch_safe(&config)?;
+
     // construct db
     let storage = if let Some(db_url) = &config.database_url {
         info!("Using PostgreSQL as storage.");
@@ -240,11 +256,21 @@ pub async fn try_spawn(config: RelayConfig, skip_diagnostics: bool) -> eyre::Res
         .allow_origin(AllowOrigin::any())
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
 
-    // Verifies Better Auth bearer JWTs (when `auth` is configured) and threads
-    // the verified user id into request extensions for user-tied sponsorship
-    // quota. No `auth` config = pass-through (address-mode quota).
-    let jwt_auth =
-        JwtAuthLayer::new(config.auth.as_ref().map(|auth| JwksCache::new(auth.jwks_url.clone())));
+    // Resolves Better Auth bearer JWTs (when `auth.jwks_url` is configured) and
+    // threads the verified user id into request extensions for user-tied
+    // sponsorship quota. A configured `auth.dev_api_key` additionally enables the
+    // LOCAL-ONLY static escape hatch (already asserted mainnet-safe at boot). No
+    // `auth` config = pass-through (address-mode quota).
+    let jwt_auth = {
+        let cache = config.auth.as_ref().map(|auth| JwksCache::new(auth.jwks_url.clone()));
+        let dev = config.auth.as_ref().and_then(|auth| {
+            auth.dev_api_key.as_ref().map(|key| DevBypass {
+                api_key: key.clone(),
+                subject: auth.dev_subject.clone().unwrap_or_else(|| "dev-local".to_string()),
+            })
+        });
+        JwtAuthLayer::new(cache, dev)
+    };
 
     // start server
     let server = Server::builder()
@@ -300,4 +326,100 @@ pub async fn try_spawn(config: RelayConfig, skip_diagnostics: bool) -> eyre::Res
         metrics,
         price_oracle,
     })
+}
+
+/// Fail-closed guard on the dev sponsorship escape hatch (`auth.dev_api_key`):
+/// when the hatch is enabled, its subject MUST carry a dedicated, finite (> 0)
+/// per-subject quota override, so the exposed static key is always tightly
+/// capped — even though it runs against the shared prod relay (the dev app calls
+/// the single hosted relay serving mainnet). Refusing to start otherwise
+/// prevents an uncapped bypass token from going live. The key stays STATIC
+/// (rotated via Infisical → `RELAY_DEV_API_KEY`), never a JWKS-signing secret;
+/// see the JWKS-rotation incident.
+fn assert_dev_hatch_safe(config: &RelayConfig) -> eyre::Result<()> {
+    let Some(auth) = config.auth.as_ref() else { return Ok(()) };
+    if auth.dev_api_key.is_none() {
+        return Ok(());
+    }
+
+    let dev_subject = auth.dev_subject.clone().unwrap_or_else(|| "dev-local".to_string());
+    check_dev_hatch_capped(&dev_subject, &config.sponsorship.quota_overrides)?;
+
+    warn!(
+        subject = %dev_subject,
+        "auth.dev_api_key is ENABLED — dev sponsorship escape hatch active (capped by its \
+         quota_override)."
+    );
+    Ok(())
+}
+
+/// Pure core of [`assert_dev_hatch_safe`]: the dev subject must have a finite,
+/// non-zero per-subject quota override.
+fn check_dev_hatch_capped(
+    dev_subject: &str,
+    quota_overrides: &std::collections::HashMap<String, u128>,
+) -> eyre::Result<()> {
+    match quota_overrides.get(dev_subject) {
+        Some(&wei) if wei > 0 => Ok(()),
+        _ => eyre::bail!(
+            "FATAL: auth.dev_api_key is set but dev_subject '{dev_subject}' has no dedicated \
+             quota_override (> 0 wei); refusing to start. Add \
+             sponsorship.quota_overrides['{dev_subject}'] to tightly cap the exposed dev key."
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{assert_dev_hatch_safe, check_dev_hatch_capped};
+    use crate::config::{AuthConfig, RelayConfig};
+    use std::collections::HashMap;
+
+    #[test]
+    fn dev_hatch_ok_when_subject_has_positive_override() {
+        // A dedicated cap makes the hatch legal — mainnet chains no longer
+        // matter, since the dev app calls the shared prod relay.
+        let overrides = HashMap::from([("dev-local".to_string(), 1_000_000_000_000_000u128)]);
+        assert!(check_dev_hatch_capped("dev-local", &overrides).is_ok());
+    }
+
+    #[test]
+    fn dev_api_key_without_dev_subject_quota_fails_closed() {
+        // Missing override -> refuse.
+        assert!(check_dev_hatch_capped("dev-local", &HashMap::new()).is_err());
+        // Zero override is not a real cap -> refuse.
+        let zero = HashMap::from([("dev-local".to_string(), 0u128)]);
+        let err = check_dev_hatch_capped("dev-local", &zero).unwrap_err().to_string();
+        assert!(err.contains("dev-local"));
+        assert!(err.contains("quota_override"));
+    }
+
+    fn cfg_with_hatch(dev_subject: Option<&str>, override_wei: Option<u128>) -> RelayConfig {
+        let mut config = RelayConfig::default();
+        config.auth = Some(AuthConfig {
+            jwks_url: "http://127.0.0.1:1/jwks".to_string(),
+            dev_api_key: Some("dev-secret".to_string()),
+            dev_subject: dev_subject.map(str::to_owned),
+        });
+        if let Some(wei) = override_wei {
+            let subject = dev_subject.unwrap_or("dev-local").to_string();
+            config.sponsorship.quota_overrides.insert(subject, wei);
+        }
+        config
+    }
+
+    #[test]
+    fn assert_dev_hatch_safe_end_to_end() {
+        // Default subject ("dev-local") + a cap -> ok.
+        assert!(assert_dev_hatch_safe(&cfg_with_hatch(None, Some(1_000_000_000_000_000))).is_ok());
+        // Explicit subject + its cap -> ok.
+        assert!(
+            assert_dev_hatch_safe(&cfg_with_hatch(Some("dev-x"), Some(1_000_000_000_000_000)))
+                .is_ok()
+        );
+        // Hatch on but no cap -> refuse.
+        assert!(assert_dev_hatch_safe(&cfg_with_hatch(None, None)).is_err());
+        // No auth block at all -> ok (hatch off).
+        assert!(assert_dev_hatch_safe(&RelayConfig::default()).is_ok());
+    }
 }

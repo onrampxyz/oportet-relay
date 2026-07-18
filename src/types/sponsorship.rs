@@ -30,25 +30,43 @@ pub enum QuotaKey {
 /// [`ChainSponsorshipConfig`] and are merged in by [`SponsorshipConfig::resolve`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SponsorshipConfig {
-    /// Sponsor every call unconditionally. Dev/testnet escape hatch.
+    /// Sponsor every call unconditionally, bypassing every guard, breaker, and
+    /// quota. Dev/testnet escape hatch only — never enable on a mainnet relay.
     #[serde(default)]
     pub sponsor_all: bool,
-    /// Contracts we always sponsor regardless of quota.
+    /// Chain guard: chain ids the relay is allowed to sponsor on (e.g. Base 8453,
+    /// Rise 4153, Polygon 137). A call on any chain NOT in this set is never
+    /// sponsored. Empty = none (fail-closed).
+    #[serde(default)]
+    pub sponsored_chains: std::collections::HashSet<ChainId>,
+    /// Target guard: contracts our sponsorship is allowed to touch. A sponsored
+    /// intent must have EVERY call target either a listed contract or a listed
+    /// (contract, selector) pair; anything else is denied (fail-closed). This is
+    /// a necessary gate, not a quota exemption — sponsored calls still consume
+    /// the per-user quota and count toward the breaker.
     #[serde(default)]
     pub whitelisted_contracts: HashSet<Address>,
-    /// (contract -> allowed 4-byte selectors) we always sponsor regardless of quota.
+    /// Target guard by method: (contract -> allowed 4-byte selectors) additionally
+    /// permitted as sponsored targets.
     #[serde(default)]
     pub whitelisted_methods: AHashMap<Address, HashSet<FixedBytes<4>>>,
     /// Global sponsored-spend ceiling per chain over the rolling window (wei).
-    /// Reaching it trips the circuit breaker -> deny all non-whitelisted sponsorship.
+    /// Reaching it trips the circuit breaker -> deny all further sponsorship.
     pub circuit_breaker_wei: U256,
-    /// Per-subject sponsored-spend ceiling over the rolling window (wei).
+    /// Primary limiter: per-subject sponsored-spend ceiling over the rolling
+    /// window (wei), keyed by `quota_key` (address or verified JWT `sub`).
     pub per_user_wei: U256,
     /// Rolling window for both the breaker and the per-user quota (hours).
     pub window_hours: u64,
     /// Which identity the per-user quota counts against.
     #[serde(default)]
     pub quota_key: QuotaKey,
+    /// Per-subject quota overrides (subject -> wei per window). A subject listed
+    /// here uses this ceiling instead of `per_user_wei`; subjects not listed use
+    /// `per_user_wei`. Used to cap a specific identity — notably the dev
+    /// escape-hatch subject — tighter (or looser) than a normal user.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub quota_overrides: HashMap<String, u128>,
 }
 
 impl Default for SponsorshipConfig {
@@ -57,12 +75,14 @@ impl Default for SponsorshipConfig {
         // policy is configured. Ceilings seed from the reverted merchant-side design.
         Self {
             sponsor_all: false,
+            sponsored_chains: std::collections::HashSet::default(),
             whitelisted_contracts: HashSet::default(),
             whitelisted_methods: AHashMap::default(),
             circuit_breaker_wei: U256::from(1_000_000_000_000_000_000u128), // 1 ETH / window
             per_user_wei: U256::from(10_000_000_000_000_000u128),           // 0.01 ETH / window
             window_hours: 24,
             quota_key: QuotaKey::Address,
+            quota_overrides: HashMap::new(),
         }
     }
 }
@@ -108,6 +128,8 @@ impl SponsorshipConfig {
 
         SponsorshipConfig {
             sponsor_all: o.sponsor_all.unwrap_or(self.sponsor_all),
+            // Chain guard is a relay-global allowlist, not per-chain overridable.
+            sponsored_chains: self.sponsored_chains.clone(),
             whitelisted_contracts: o
                 .whitelisted_contracts
                 .clone()
@@ -120,6 +142,8 @@ impl SponsorshipConfig {
             per_user_wei: o.per_user_wei.unwrap_or(self.per_user_wei),
             window_hours: o.window_hours.unwrap_or(self.window_hours),
             quota_key: o.quota_key.unwrap_or(self.quota_key),
+            // Per-subject overrides are relay-global, not per-chain overridable.
+            quota_overrides: self.quota_overrides.clone(),
         }
     }
 }

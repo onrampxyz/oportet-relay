@@ -119,6 +119,27 @@ pub struct AuthConfig {
     /// JWKS endpoint of the app's auth server, e.g.
     /// `https://onramp.xyz/api/auth/jwks`.
     pub jwks_url: String,
+    /// LOCAL-ONLY dev escape hatch: a static bearer token that bypasses JWKS
+    /// verification and injects [`dev_subject`](Self::dev_subject) as the
+    /// verified user. Lets local dev exercise the user-mode quota path without
+    /// minting a real Better Auth JWT or reaching the JWKS endpoint.
+    ///
+    /// `None` (default) = hatch OFF. This is deliberately a STATIC token (env
+    /// `RELAY_DEV_API_KEY` / `relay.yaml`), rotatable via Infisical but never a
+    /// JWKS-signing secret — a rotating signing secret would reintroduce the
+    /// JWKS-rotation orphan bug. It is allowed on the shared prod relay, but a
+    /// boot assertion (`spawn::assert_dev_hatch_safe`) refuses to start unless
+    /// [`dev_subject`](Self::dev_subject) carries a dedicated, non-zero
+    /// `sponsorship.quota_overrides` entry, so the exposed key is always tightly
+    /// capped. The injected subject is still fully gated (chain/target guard,
+    /// breaker, quota) — the hatch only shortcuts JWKS *identity*.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev_api_key: Option<String>,
+    /// Fixed subject injected when the dev escape hatch matches. Defaults to
+    /// `"dev-local"`. Only meaningful when `dev_api_key` is set; must have a
+    /// dedicated `sponsorship.quota_overrides` entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev_subject: Option<String>,
 }
 
 impl RelayConfig {

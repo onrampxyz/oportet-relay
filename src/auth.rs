@@ -38,6 +38,40 @@ use tracing::{debug, warn};
 #[derive(Clone, Debug)]
 pub struct VerifiedSub(pub String);
 
+/// LOCAL-ONLY dev escape hatch. A request whose bearer token equals `api_key`
+/// (compared in constant time) is accepted without JWKS verification and gets
+/// `subject` injected as its [`VerifiedSub`], so local dev can exercise the
+/// user-mode quota path without a real Better Auth JWT.
+///
+/// The token is STATIC by design — rotatable via Infisical, but never a
+/// JWKS-signing secret (a rotating signing secret would reintroduce the
+/// JWKS-rotation orphan bug). It is allowed on the shared prod relay; a boot
+/// assertion requires the injected subject to carry a dedicated non-zero quota
+/// override so the exposed key is always tightly capped. Injecting the subject
+/// does NOT bypass gating — it still flows through the chain/target guard,
+/// breaker, and quota; the hatch only shortcuts JWKS *identity*.
+#[derive(Clone, Debug)]
+pub struct DevBypass {
+    /// The static bearer that unlocks the hatch.
+    pub api_key: String,
+    /// The subject injected on a match (defaults to `"dev-local"` at the call site).
+    pub subject: String,
+}
+
+/// Constant-time byte-slice equality, to avoid a timing oracle on the dev key.
+/// Returns `false` immediately on a length mismatch (the key length is not
+/// itself secret), otherwise accumulates differences without early exit.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 #[derive(Deserialize)]
 struct JwtHeader {
     alg: String,
@@ -159,20 +193,23 @@ fn bearer_token(headers: &http::HeaderMap) -> Option<&str> {
     headers.get(header::AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")
 }
 
-/// Tower layer that verifies an optional `Authorization: Bearer` JWT and inserts
-/// the resulting [`VerifiedSub`] into the request extensions. When constructed
-/// without a cache (no `auth` config) it is a pass-through, so address-mode /
-/// `sponsor_all` deployments need no JWKS endpoint.
+/// Tower layer that resolves an optional `Authorization: Bearer` credential to a
+/// [`VerifiedSub`] and inserts it into the request extensions. A matching dev
+/// key (when configured) is honored first; otherwise the token is verified
+/// against the JWKS (when a cache is configured). With neither cache nor dev
+/// hatch it is a pass-through, so address-mode / `sponsor_all` deployments need
+/// no JWKS endpoint.
 #[derive(Clone, Debug)]
 pub struct JwtAuthLayer {
     cache: Option<JwksCache>,
+    dev: Option<DevBypass>,
 }
 
 impl JwtAuthLayer {
-    /// Build the layer. `Some(cache)` enables verification; `None` makes it a
-    /// pass-through.
-    pub fn new(cache: Option<JwksCache>) -> Self {
-        Self { cache }
+    /// Build the layer. `cache` enables JWKS verification; `dev` enables the
+    /// local escape hatch. Both `None` = pass-through.
+    pub fn new(cache: Option<JwksCache>, dev: Option<DevBypass>) -> Self {
+        Self { cache, dev }
     }
 }
 
@@ -180,16 +217,17 @@ impl<S> Layer<S> for JwtAuthLayer {
     type Service = JwtAuthService<S>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        JwtAuthService { inner, cache: self.cache.clone() }
+        JwtAuthService { inner, cache: self.cache.clone(), dev: self.dev.clone() }
     }
 }
 
-/// The service produced by [`JwtAuthLayer`]; verifies the bearer JWT (if a cache
-/// is configured) before delegating to `inner`.
+/// The service produced by [`JwtAuthLayer`]; resolves the bearer credential (dev
+/// hatch first, then JWKS) before delegating to `inner`.
 #[derive(Clone, Debug)]
 pub struct JwtAuthService<S> {
     inner: S,
     cache: Option<JwksCache>,
+    dev: Option<DevBypass>,
 }
 
 impl<S, B> Service<HttpRequest<B>> for JwtAuthService<S>
@@ -209,17 +247,29 @@ where
 
     fn call(&mut self, mut request: HttpRequest<B>) -> Self::Future {
         let cache = self.cache.clone();
+        let dev = self.dev.clone();
         // Call the ready clone; keep `self.inner` as the fresh clone so we never
         // call a service that wasn't polled ready.
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
 
+        // Copy the bearer out so the immutable header borrow is released before
+        // we mutate the request extensions below.
+        let token = bearer_token(request.headers()).map(str::to_owned);
+
         async move {
-            if let Some(cache) = cache
-                && let Some(token) = bearer_token(request.headers())
-                && let Some(sub) = cache.verify(token).await
-            {
-                request.extensions_mut().insert(VerifiedSub(sub));
+            if let Some(token) = token {
+                if let Some(dev) = &dev
+                    && ct_eq(token.as_bytes(), dev.api_key.as_bytes())
+                {
+                    // Local dev escape hatch: static bearer, no JWKS round-trip.
+                    debug!(subject = %dev.subject, "jwt: dev escape hatch accepted bearer");
+                    request.extensions_mut().insert(VerifiedSub(dev.subject.clone()));
+                } else if let Some(cache) = &cache
+                    && let Some(sub) = cache.verify(&token).await
+                {
+                    request.extensions_mut().insert(VerifiedSub(sub));
+                }
             }
             inner.call(request).await.map_err(Into::into)
         }
@@ -285,5 +335,79 @@ mod tests {
         let cache = preloaded_cache("kid-1", other.verifying_key()).await;
         let token = make_jwt(&signer, "kid-1", "user-123", 32_503_680_000);
         assert!(cache.verify(&token).await.is_none());
+    }
+
+    #[test]
+    fn ct_eq_matches_std_eq() {
+        assert!(ct_eq(b"secret-token", b"secret-token"));
+        assert!(!ct_eq(b"secret-token", b"secret-toker"));
+        assert!(!ct_eq(b"secret", b"secret-token")); // length mismatch
+        assert!(ct_eq(b"", b""));
+    }
+
+    /// Drives a request with the given bearer through the real [`JwtAuthLayer`]
+    /// tower service and returns the [`VerifiedSub`] the inner service observed.
+    async fn resolved_sub(
+        dev: Option<DevBypass>,
+        cache: Option<JwksCache>,
+        bearer: Option<&str>,
+    ) -> Option<String> {
+        use std::sync::{Arc, Mutex};
+        use tower::ServiceExt;
+
+        let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let sink = seen.clone();
+        let inner = tower::service_fn(move |req: HttpRequest<HttpBody>| {
+            let sink = sink.clone();
+            async move {
+                if let Some(v) = req.extensions().get::<VerifiedSub>() {
+                    *sink.lock().unwrap() = Some(v.0.clone());
+                }
+                Ok::<HttpResponse<HttpBody>, BoxError>(HttpResponse::new(HttpBody::empty()))
+            }
+        });
+
+        let mut svc = JwtAuthLayer::new(cache, dev).layer(inner);
+        let mut builder = HttpRequest::builder();
+        if let Some(t) = bearer {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {t}"));
+        }
+        let req = builder.body(HttpBody::empty()).unwrap();
+        svc.ready().await.unwrap().call(req).await.unwrap();
+        seen.lock().unwrap().clone()
+    }
+
+    fn dev_bypass() -> DevBypass {
+        DevBypass { api_key: "dev-secret-123".into(), subject: "dev-local".into() }
+    }
+
+    // The dev escape hatch accepts a matching static bearer and injects the
+    // fixed dev subject — no JWKS cache involved.
+    #[tokio::test]
+    async fn dev_hatch_injects_subject() {
+        let sub = resolved_sub(Some(dev_bypass()), None, Some("dev-secret-123")).await;
+        assert_eq!(sub.as_deref(), Some("dev-local"));
+    }
+
+    // A non-matching bearer with the hatch on but no JWKS cache yields no
+    // verified subject (fail-closed; falls through to address-mode).
+    #[tokio::test]
+    async fn dev_hatch_rejects_wrong_key() {
+        let sub = resolved_sub(Some(dev_bypass()), None, Some("not-the-key")).await;
+        assert_eq!(sub, None);
+    }
+
+    // No bearer at all -> no subject.
+    #[tokio::test]
+    async fn no_bearer_no_subject() {
+        let sub = resolved_sub(Some(dev_bypass()), None, None).await;
+        assert_eq!(sub, None);
+    }
+
+    // Hatch off + no cache = pure pass-through even with a bearer present.
+    #[tokio::test]
+    async fn passthrough_when_disabled() {
+        let sub = resolved_sub(None, None, Some("anything")).await;
+        assert_eq!(sub, None);
     }
 }
