@@ -644,10 +644,14 @@ impl Environment {
             )
             .await?;
 
-            // Configure relay to use LayerZero settler
+            // Configure relay to use LayerZero settler.
+            // wait_verification_timeout MUST stay strictly below escrow_refund_threshold
+            // (60s here) or the InteropService boot assertion fails closed — the mock LZ
+            // relayer delivers in milliseconds, so 30s is ample headroom for the test
+            // while honoring the settle-vs-refund window invariant.
             interop_config.settler = SettlerConfig {
                 implementation: SettlerImplementation::LayerZero(lz_deployment.relay_config),
-                wait_verification_timeout: Duration::from_secs(300),
+                wait_verification_timeout: Duration::from_secs(30),
             };
 
             layerzero_config = Some(lz_deployment.test_config);

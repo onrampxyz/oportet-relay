@@ -381,6 +381,9 @@ pub async fn deploy_layerzero_infrastructure(
     let relay_config = relay::config::LayerZeroConfig {
         endpoint_addresses,
         settler_signer_key: Some(LAYERZERO_DEPLOYER_PRIVATE_KEY.to_string()),
+        // No dedicated read endpoints in tests: is_message_available falls back to the
+        // primary (anvil) provider.
+        read_endpoints: Default::default(),
     };
 
     let test_config = LayerZeroTestConfig { endpoints, escrows, eids };

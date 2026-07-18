@@ -22,12 +22,16 @@ impl LZChainConfigs {
         endpoint_ids: &HashMap<ChainId, EndpointId>,
         endpoint_addresses: &HashMap<ChainId, Address>,
         providers: &HashMap<ChainId, DynProvider>,
+        read_providers: &HashMap<ChainId, DynProvider>,
     ) -> Self {
         let configs: HashMap<ChainId, LZChainConfig> = endpoint_ids
             .iter()
             .filter_map(|(chain_id, endpoint_id)| {
                 let endpoint_address = endpoint_addresses.get(chain_id)?;
                 let provider = providers.get(chain_id)?;
+                // Dedicated read provider if configured for this chain, else reuse the
+                // primary (websocket) provider so behavior is unchanged.
+                let read_provider = read_providers.get(chain_id).unwrap_or(provider);
 
                 Some((
                     *chain_id,
@@ -36,6 +40,7 @@ impl LZChainConfigs {
                         endpoint_id: *endpoint_id,
                         endpoint_address: *endpoint_address,
                         provider: provider.clone(),
+                        read_provider: read_provider.clone(),
                     },
                 ))
             })
@@ -74,7 +79,10 @@ impl LZChainConfigs {
     ) -> Result<bool, SettlementError> {
         let dst_config = self.ensure_chain_config(packet.dst_chain_id)?;
 
-        let receive_lib = IReceiveUln302::new(packet.receive_lib_address, &dst_config.provider);
+        // Use the dedicated read provider so verification reads survive a websocket
+        // outage of the primary provider.
+        let receive_lib =
+            IReceiveUln302::new(packet.receive_lib_address, &dst_config.read_provider);
 
         // Check if all required DVNs have verified.
         Ok(receive_lib

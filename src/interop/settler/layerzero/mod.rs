@@ -69,8 +69,13 @@ pub struct LZChainConfig {
     pub endpoint_id: EndpointId,
     /// LayerZero endpoint address for this chain.
     pub endpoint_address: Address,
-    /// Provider for this chain.
+    /// Primary provider for this chain (websocket, used for `PayloadVerified`
+    /// subscriptions and general reads).
     pub provider: DynProvider,
+    /// Provider used ONLY for state reads (`is_message_available`), so verification
+    /// reads survive a websocket outage of `provider`. Falls back to a clone of
+    /// `provider` when no dedicated read endpoint is configured for the chain.
+    pub read_provider: DynProvider,
 }
 
 /// LayerZero settler implementation for cross-chain settlement attestation.
@@ -101,6 +106,7 @@ impl LayerZeroSettler {
     pub async fn new(
         endpoint_addresses: HashMap<ChainId, Address>,
         providers: HashMap<ChainId, DynProvider>,
+        read_providers: HashMap<ChainId, DynProvider>,
         storage: RelayStorage,
         tx_service_handles: TransactionServiceHandles,
         settler_signer: DynSigner,
@@ -135,7 +141,8 @@ impl LayerZeroSettler {
             .collect();
 
         // Build chain configs
-        let chain_configs = LZChainConfigs::new(&endpoint_ids, &endpoint_addresses, &providers);
+        let chain_configs =
+            LZChainConfigs::new(&endpoint_ids, &endpoint_addresses, &providers, &read_providers);
 
         // Create LayerZero verification monitor for shared WebSocket connections
         let verification_monitor = LayerZeroVerificationMonitor::new(chain_configs.clone());

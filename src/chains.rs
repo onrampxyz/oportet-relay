@@ -448,6 +448,24 @@ impl Chains {
         self.chains.get(&chain_id).and_then(|chain| chain.assets.native())
     }
 
+    /// Canonical native-currency symbol for a chain.
+    ///
+    /// Used by interop routing to keep economically-distinct native gas tokens from
+    /// being treated as fungible across chains: Polygon's native gas is POL, not ETH,
+    /// so POL must never be sourced or settled as ETH cross-chain. Polygon mainnet
+    /// (137) and Amoy testnet (80002) are POL; every other supported chain
+    /// (Base/Rise/Ethereum + their testnets) is ETH.
+    ///
+    /// NOTE: extend this table before adding any chain whose native gas token is
+    /// neither ETH nor POL (e.g. BNB, AVAX) — an unlisted non-ETH chain would default
+    /// to "ETH" and could be cross-mapped incorrectly.
+    fn native_currency_symbol(chain_id: ChainId) -> &'static str {
+        match chain_id {
+            137 | 80002 => "POL",
+            _ => "ETH",
+        }
+    }
+
     /// Maps an asset on `src_chain_id` to an equivalent asset on `dst_chain_id`.
     ///
     /// Returns `None` if there is no equivalent asset, or if the equivalent asset is not enabled
@@ -459,9 +477,22 @@ impl Chains {
         asset: Address,
     ) -> Option<&AssetDescriptor> {
         let (asset_uid, _) = self.interop_asset(src_chain_id, asset)?;
-        self.chains
+        let dst_desc = self
+            .chains
             .get(&dst_chain_id)
-            .and_then(|dst_chain| dst_chain.assets.get(asset_uid).filter(|desc| desc.interop))
+            .and_then(|dst_chain| dst_chain.assets.get(asset_uid).filter(|desc| desc.interop))?;
+
+        // POL != ETH guard: never treat a native gas token as interop-fungible across
+        // chains whose native currencies differ (e.g. Polygon POL vs ETH), even if the
+        // config assigns them the same asset uid. Prevents sourcing/settling POL as ETH.
+        if (asset == Address::ZERO || dst_desc.address == Address::ZERO)
+            && Self::native_currency_symbol(src_chain_id)
+                != Self::native_currency_symbol(dst_chain_id)
+        {
+            return None;
+        }
+
+        Some(dst_desc)
     }
 
     /// Maps an asset on `chain_id` to equivalent assets on other chains.
@@ -474,10 +505,21 @@ impl Chains {
         asset: Address,
     ) -> impl Iterator<Item = (ChainId, &AssetDescriptor)> {
         let asset_uid = self.interop_asset(chain_id, asset).map(|(uid, _)| uid);
+        let src_native = Self::native_currency_symbol(chain_id);
 
         self.chains_iter().filter_map(move |chain| {
             let asset_uid = asset_uid.as_ref()?;
-            chain.assets().get(asset_uid).filter(|desc| desc.interop).map(|desc| (chain.id(), desc))
+            let desc = chain.assets().get(asset_uid).filter(|desc| desc.interop)?;
+
+            // POL != ETH guard (see `map_interop_asset`): skip a native gas token whose
+            // native currency differs from the source chain's.
+            if (asset == Address::ZERO || desc.address == Address::ZERO)
+                && src_native != Self::native_currency_symbol(chain.id())
+            {
+                return None;
+            }
+
+            Some((chain.id(), desc))
         })
     }
 
@@ -504,6 +546,20 @@ impl std::fmt::Debug for Chains {
             .field("interop", &self.interop)
             .finish()
     }
+}
+
+/// Build a standalone provider for LayerZero interop state reads
+/// (`is_message_available`), independent of a chain's primary (websocket) provider.
+///
+/// Wiring a separate read transport means on-chain verification reads survive a
+/// websocket outage of the primary provider — the ws socket and this read transport
+/// fail independently. Intended for an `http(s)://` endpoint; no sequencer or
+/// send-raw-delegate layers, since it is read-only.
+pub(crate) async fn build_read_provider(
+    chain_id: ChainId,
+    endpoint: &Url,
+) -> eyre::Result<DynProvider> {
+    try_build_provider(chain_id, endpoint, None, Vec::new(), Duration::from_secs(30)).await
 }
 
 async fn try_build_provider(

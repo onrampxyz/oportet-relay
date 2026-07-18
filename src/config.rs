@@ -911,6 +911,13 @@ pub struct LayerZeroConfig {
     /// Can be set via environment variable ${RELAY_SETTLER_SIGNER_KEY} or in the config file
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settler_signer_key: Option<String>,
+    /// Optional per-chain HTTP(S) RPC endpoints used ONLY for LayerZero state reads
+    /// (`is_message_available`). Kept separate from the primary (websocket) provider so
+    /// that on-chain verification reads survive a websocket outage — the ws socket and
+    /// this read transport fail independently. Chains without an entry fall back to the
+    /// primary provider (no behavior change).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty", with = "crate::serde::hash_map")]
+    pub read_endpoints: HashMap<ChainId, Url>,
 }
 
 impl LayerZeroConfig {
@@ -933,9 +940,25 @@ impl LayerZeroConfig {
 
         info!(address = ?settler_signer.address(), "LayerZero settler signer configured.");
 
+        // Build a dedicated HTTP read provider per chain that has a `read_endpoints`
+        // entry. These back `is_message_available`, so verification reads survive a
+        // websocket outage of the primary provider. Chains without an entry fall back
+        // to the primary provider inside `LZChainConfigs::new` (no behavior change).
+        let mut read_providers: HashMap<ChainId, DynProvider> = HashMap::default();
+        for (chain_id, url) in &self.read_endpoints {
+            let provider =
+                crate::chains::build_read_provider(*chain_id, url).await.map_err(|e| {
+                    SettlementError::InternalError(format!(
+                        "failed to build LayerZero read provider for chain {chain_id}: {e}"
+                    ))
+                })?;
+            read_providers.insert(*chain_id, provider);
+        }
+
         LayerZeroSettler::new(
             self.endpoint_addresses.clone(),
             providers,
+            read_providers,
             storage,
             tx_service_handles,
             settler_signer,

@@ -1263,6 +1263,28 @@ impl InteropService {
         liquidity_tracker: LiquidityTracker,
         interop_config: InteropConfig,
     ) -> eyre::Result<(Self, InteropServiceHandle)> {
+        // Durability invariant (docs/layerzero-settler-durability.md #3): the verification
+        // wait MUST expire strictly before the escrow refund window opens, otherwise a
+        // settlement can race an already-refunded escrow (revert / double-spend risk).
+        // `refundTimestamp = created_at + escrow_refund_threshold`, so compare the two
+        // second-denominated knobs directly. Fail closed at boot.
+        let wait_secs = interop_config.settler.wait_verification_timeout.as_secs();
+        let refund_secs = interop_config.escrow_refund_threshold;
+        eyre::ensure!(
+            wait_secs < refund_secs,
+            "interop config: settler.wait_verification_timeout ({wait_secs}s) must be strictly \
+             below interop.escrow_refund_threshold ({refund_secs}s) so verification cannot race \
+             the escrow refund window"
+        );
+        if wait_secs.saturating_mul(5) >= refund_secs.saturating_mul(4) {
+            tracing::warn!(
+                wait_secs,
+                refund_secs,
+                "interop: wait_verification_timeout is within 20% of escrow_refund_threshold; \
+                 leave more margin for worst-case DVN verification latency vs the refund window"
+            );
+        }
+
         let (command_tx, command_rx) = mpsc::unbounded_channel();
 
         let storage = liquidity_tracker.storage().clone();

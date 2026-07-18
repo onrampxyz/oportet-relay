@@ -290,9 +290,15 @@ impl MultichainTransferSetup {
         let mut env_config =
             EnvironmentConfig { num_chains, use_layerzero, num_signers: 1, ..Default::default() };
 
-        // Override refund threshold if specified
+        // Override refund threshold if specified. Keep wait_verification_timeout strictly
+        // below the refund window so the InteropService boot assertion holds: a short test
+        // refund threshold must not leave the verification timeout at or above it.
         if let Some(threshold) = escrow_refund_threshold {
             env_config.interop_config.escrow_refund_threshold = threshold;
+            if env_config.interop_config.settler.wait_verification_timeout.as_secs() >= threshold {
+                env_config.interop_config.settler.wait_verification_timeout =
+                    std::time::Duration::from_secs(threshold.saturating_sub(1).max(1));
+            }
         }
 
         let env = Environment::setup_with_config(env_config).await?;

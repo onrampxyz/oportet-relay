@@ -36,6 +36,16 @@ use tokio::{
 };
 use tracing::{debug, error, info, trace, warn};
 
+/// Cadence for the independent on-chain availability poll inside [`monitor_packet`].
+///
+/// Closes the silent-websocket-stall gap: if the destination node's socket goes
+/// "zombie" (TCP alive, node quietly stops pushing `PayloadVerified` logs, no error
+/// surfaced) neither `recv()` nor the resubscribe path fires, and the packet would
+/// ride to `wait_verification_timeout` and be refunded instead of delivered. Re-reading
+/// authoritative `is_message_available` on this fixed cadence degrades a silent stall to
+/// "delivered late" rather than "refunded".
+const PACKET_AVAILABILITY_POLL_INTERVAL: Duration = Duration::from_secs(15);
+
 /// Represents an active log subscription for a specific chain and receive library combination.
 ///
 /// Each subscription monitors PayloadVerified events from a specific receive library address
@@ -256,6 +266,13 @@ impl LayerZeroVerificationMonitor {
                 return Ok(packet.guid);
             }
 
+            // Independent liveness poll (see `PACKET_AVAILABILITY_POLL_INTERVAL`). Consume
+            // the immediate first tick here since we just checked availability above, so
+            // the poll fires on-cadence rather than instantly re-reading.
+            let mut availability_poll =
+                tokio::time::interval(PACKET_AVAILABILITY_POLL_INTERVAL);
+            availability_poll.tick().await;
+
             // Wait for event
             loop {
                 tokio::select! {
@@ -281,6 +298,20 @@ impl LayerZeroVerificationMonitor {
                                 warn!(guid = ?packet.guid, "Subscription closed, will recreate");
                                 break;
                             }
+                        }
+                    }
+                    _ = availability_poll.tick() => {
+                        // Poll-driven fallback: re-read authoritative chain state
+                        // independent of any `PayloadVerified` log, so a zombie socket
+                        // still resolves to delivery.
+                        if self.inner.chain_configs.is_message_available(&packet).await? {
+                            trace!(
+                                guid = ?packet.guid,
+                                src_chain = packet.src_chain_id,
+                                dst_chain = packet.dst_chain_id,
+                                "Packet verified on chain (availability poll)"
+                            );
+                            return Ok(packet.guid);
                         }
                     }
                     _ = tokio::time::sleep_until(timeout_deadline) => {
