@@ -24,13 +24,18 @@ funder: "0xFC4Cd2DCfF0F1e2781BF9fE7F48378843E176A2e"
 escrow: "0xCd075ceb5Cd463a9233a8085fc915767139F655c"
 
 quote:
-  constantRate: 1.0
+  # No constantRate: the CoinGecko Pro oracle is live (GECKO_API env on the
+  # service). constantRate 1.0 was a testnet stub; on mainnet it would misprice
+  # any non-ETH fee token and lie in USD fee reporting.
   gas:
     intentBuffer: 0
     txBuffer: 0
-  # 60s: a passkey-signed flow (biometric/PIN prompt between prepareCalls and
-  # sendPreparedCalls) cannot redeem a quote inside the 5s default.
-  ttl: 60
+  # 30s: oportet fires prepareCalls immediately before the passkey prompt
+  # (verified in RelayActions.sendCalls), so the window only has to cover the
+  # human prompt itself - measured 10-30s for PIN fallback, 3-8s for biometric.
+  # Price drift inside 30s is absorbed by the quote's fee headroom: alloy's
+  # default EIP-1559 estimator prices max_fee at 2x basefee + priority.
+  ttl: 30
   rateTtl: 300
 
 # Gas-sponsorship policy. sponsor_all zeroes every eligible intent's fee (the
