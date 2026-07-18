@@ -36,7 +36,9 @@ quote:
   # Price drift inside 30s is absorbed by the quote's fee headroom: alloy's
   # default EIP-1559 estimator prices max_fee at 2x basefee + priority.
   ttl: 30
-  rateTtl: 300
+  # 180s: 3x the 60s CoinGecko poll - survives one failed poll on last-good,
+  # fail-closes after ~2 consecutive failures (worst-case stale price ~2.5min).
+  rateTtl: 180
 
 # Gas-sponsorship policy. sponsor_all zeroes every eligible intent's fee (the
 # funder pays gas). Ceiling fields are required (not serde-defaulted). Flip

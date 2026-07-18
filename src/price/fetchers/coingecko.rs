@@ -47,7 +47,7 @@ impl CoinGecko {
     }
 
     /// Creates an instance of [`CoinGecko`] that sends a price feed to [`PriceOracle`] for all
-    /// tokens from a spawned task every 10 seconds.
+    /// tokens from a spawned task every 60 seconds.
     pub fn launch(update_tx: mpsc::UnboundedSender<PriceOracleMessage>, config: &RelayConfig) {
         if Self::api_key().is_empty() {
             warn!("GECKO_API environment variable not set, CoinGecko price fetcher will not run");
