@@ -75,6 +75,14 @@ chains:
       ethereum:
         address: "0x0000000000000000000000000000000000000000"
         fee_token: true
+      # RiseX production testnet USDC. uid MUST be the CoinGecko coin id so the
+      # price fetcher resolves fiat; decimals verified on-chain (6). fee_token
+      # is inert while sponsorship.sponsor_all is true, but makes getAssets
+      # enumerate the balance for wallets holding it.
+      usd-coin:
+        address: "0x8d17fC7Db6b4FCf40AFB296354883DEC95a12f58"
+        decimals: 6
+        fee_token: true
     signers:
       num_signers: 3
   # --- Mainnet (uniform contract set deployed + funded on all three, 2026-07-17).
