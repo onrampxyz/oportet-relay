@@ -65,6 +65,22 @@ pub enum RelayError {
     /// The chain is not supported.
     #[error("unsupported chain {0}")]
     UnsupportedChain(ChainId),
+    /// `wallet_ethCall` was asked to read a contract that is not on the
+    /// allowlist. Deliberately says which pair was refused: the allowlist is
+    /// public in the source, so naming it leaks nothing and saves the caller
+    /// guessing why an otherwise valid read returned an error.
+    #[error("reads are not allowed for {to} on chain {chain}")]
+    ReadNotAllowed {
+        /// The chain the caller asked to read on.
+        chain: ChainId,
+        /// The contract the caller asked to read.
+        to: Address,
+    },
+    /// `wallet_ethCall` was called without a verified identity. The method is
+    /// authenticated because it spends our provider quota on the caller's
+    /// behalf.
+    #[error("this method requires an authenticated session")]
+    ReadRequiresAuth,
     /// The orchestrator is not supported.
     #[error("unsupported orchestrator {0}")]
     UnsupportedOrchestrator(Address),
@@ -153,6 +169,13 @@ impl From<RelayError> for jsonrpsee::types::error::ErrorObject<'static> {
             RelayError::Intent(inner) => (*inner).into(),
             RelayError::Keys(inner) => inner.into(),
             RelayError::Storage(inner) => inner.into(),
+            // Caller errors, not ours. Deliberately NOT internal_rpc: an
+            // internal code tells a client "our fault, retry", and retrying an
+            // unlisted contract or an anonymous read never succeeds.
+            RelayError::ReadNotAllowed { .. } => invalid_params(err.to_string()),
+            RelayError::ReadRequiresAuth => {
+                rpc_err(jsonrpsee::types::error::INVALID_REQUEST_CODE, err.to_string(), None)
+            }
             RelayError::UnsupportedChain(_)
             | RelayError::AbiError(_)
             | RelayError::RpcError(_)

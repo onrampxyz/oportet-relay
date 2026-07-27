@@ -67,6 +67,7 @@ use crate::{
     config::QuoteConfig,
     error::{AuthError, KeysError, QuoteError, RelayError},
     price::PriceOracle,
+    rpc::{EthCallParameters, is_read_allowed},
     signers::DynSigner,
     sponsorship::SponsorshipEvaluator,
     storage::{RelayStorage, StorageApi},
@@ -184,6 +185,18 @@ pub trait RelayApi {
         &self,
         parameters: AddFaucetFundsParameters,
     ) -> RpcResult<AddFaucetFundsResponse>;
+
+    /// Perform a read-only `eth_call` against an allowlisted contract.
+    ///
+    /// This exists so a device does not have to depend on a third-party public
+    /// RPC for reads it must make before it can trade. It is NOT a general
+    /// node: see [`crate::rpc::READ_ALLOWLIST`] for what it will read, and the
+    /// module docs there for why it is a list rather than a passthrough.
+    ///
+    /// `with_extensions` because the method requires a verified identity — it
+    /// spends our provider quota on the caller's behalf.
+    #[method(name = "ethCall", with_extensions)]
+    async fn eth_call(&self, parameters: EthCallParameters) -> RpcResult<Bytes>;
 }
 
 /// Implementation of the Ithaca `relay_` namespace.
@@ -3699,6 +3712,34 @@ impl RelayApiServer for Relay {
             transaction_hash: status.tx_hash(),
             message: Some("Faucet funding successful".to_string()),
         })
+    }
+
+    async fn eth_call(&self, ext: &Extensions, parameters: EthCallParameters) -> RpcResult<Bytes> {
+        let EthCallParameters { chain_id, to, data } = parameters;
+        tracing::Span::current().record("eth.chain_id", chain_id);
+
+        // Authenticated first, and before the allowlist is consulted: an
+        // anonymous caller should not be able to use the error message to map
+        // which contracts we read.
+        if ext.get::<VerifiedSub>().is_none() {
+            return Err(RelayError::ReadRequiresAuth.into());
+        }
+
+        if !is_read_allowed(chain_id, to) {
+            warn!("wallet_ethCall refused for {to} on chain {chain_id}");
+            return Err(RelayError::ReadNotAllowed { chain: chain_id, to }.into());
+        }
+
+        let provider = self.provider(chain_id)?;
+
+        // `to` and `input` only. No `from`, no value, no gas, no block tag —
+        // see EthCallParameters for why the caller cannot reach any of them.
+        let result = provider
+            .call(TransactionRequest::default().to(to).input(data.into()))
+            .await
+            .map_err(RelayError::from)?;
+
+        Ok(result)
     }
 }
 
