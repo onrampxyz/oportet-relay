@@ -56,6 +56,24 @@ sponsorship:
 auth:
   jwks_url: "https://onramp.xyz/api/auth/jwks"
 
+# Every field here is the upstream default EXCEPT balance_check_interval; the
+# struct has no per-field serde defaults, so a partial block fails to parse.
+transactions:
+  max_pending_transactions: 100
+  max_transactions_per_signer: 16
+  max_queued_per_eoa: 1
+  # 60s, not the 5s default. Each tick costs eth_getBalance + eth_feeHistory PER
+  # SIGNER PER CHAIN, and it runs whether or not anyone is using the app - at 3
+  # signers x 5 chains that was 1.35 req/s per chain, ~7M requests/month against
+  # the two QuickNode endpoints (Base 8453 + Polygon 137) alone, ~88% of all
+  # relay RPC traffic. The check only gates how fast a drained signer is paused
+  # and topped up from the funder, so trading 5s of detection latency for a
+  # 12x cut is free at our volume. Revisit if signers start actually draining.
+  balance_check_interval: 60
+  nonce_check_interval: 60
+  transaction_timeout: 60
+  public_node_endpoints: {}
+
 chains:
   84532:
     endpoint: "https://sepolia.base.org"
