@@ -93,11 +93,15 @@ pub trait RelayApi {
     async fn health(&self) -> RpcResult<Health>;
 
     /// Liveness check - returns "ok" if relay process is running.
-    #[method(name = "live")]
+    ///
+    /// Aliased bare, like `health`: the GET proxy at spawn.rs maps `/live` to the method
+    /// name `live`, which the `wallet` namespace would otherwise only expose as
+    /// `wallet_live`, so the path answered -32601 instead of running the check.
+    #[method(name = "live", aliases = ["live"])]
     async fn live(&self) -> RpcResult<String>;
 
     /// Readiness check - returns "ok" if relay can serve traffic (mainnet RPCs & DB healthy).
-    #[method(name = "ready")]
+    #[method(name = "ready", aliases = ["ready"])]
     async fn ready(&self) -> RpcResult<String>;
 
     /// Get capabilities of the relay, which are different sets of configuration values.
