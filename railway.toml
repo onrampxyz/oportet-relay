@@ -1,0 +1,16 @@
+# Railway config-as-code. Railway reads this from the service root, and keys
+# absent here keep whatever the dashboard already has, so this file is only the
+# healthcheck - build (DOCKERFILE) and the rest stay where they are.
+
+[deploy]
+# /ready answers 200 only when every non-testnet chain returns eth_blockNumber
+# AND the database responds (rpc/relay.rs `ready`), so a build that cannot reach
+# a chain or Postgres never takes traffic; the previous deployment keeps serving.
+# /health would have been the weaker check: it is what /ready degrades to.
+healthcheckPath = "/ready"
+# Railway re-probes until this elapses, so the window is a retry budget, not a
+# deadline for the first probe. 300s is deliberately generous: chain 4153 and
+# 11155931 are unknown to alloy-chains, so `named()` returns None and the
+# unwrap_or(true) counts them as mainnet - a blip on Rise's public RPC would
+# otherwise be enough to fail an unrelated deploy.
+healthcheckTimeout = 300
