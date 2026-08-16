@@ -11,11 +11,11 @@
 # (see config.rs load_from_file), so no keyed RPC ever lands in the image.
 
 server:
-  # "::" not "0.0.0.0": Railway probes the healthcheck over its private network,
-  # which is IPv6-only, so an IPv4-only bind answers the public edge fine while
-  # every healthcheck attempt reports "service unavailable" (deploy c403d66d
-  # failed 11/11 that way). Linux leaves bindv6only off, so this stays dual-stack
-  # and IPv4 callers keep working.
+  # "::" not "0.0.0.0", for Railway's private network (relay.railway.internal),
+  # which is IPv6: an IPv4-only bind is unreachable there. Linux leaves
+  # bindv6only off, so this stays dual-stack and IPv4 callers keep working.
+  # This is NOT what fixed the healthcheck - that needed PORT=9119 on the
+  # service, see deploy/railway/README.md.
   address: "::"
   port: 9119
   metrics_port: 9000
