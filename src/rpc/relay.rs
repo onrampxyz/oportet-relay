@@ -18,7 +18,8 @@ use crate::{
         FundingIntentContext, GasEstimate, Health, IERC20, IEscrow, IntentKey, IntentKind, Intents,
         Key, MULTICHAIN_NONCE_PREFIX, MerkleLeafInfo,
         OrchestratorContract::{self, IntentExecuted},
-        Quotes, SignedCall, SignedCalls, SourcedAsset, Transfer, VersionedContracts,
+        Quotes, SignedCall, SignedCalls, SourcedAsset, SponsorshipQuotaParameters,
+        SponsorshipQuotaResponse, Transfer, VersionedContracts,
         rpc::{
             AddFaucetFundsParameters, AddFaucetFundsResponse, AddressOrNative, Asset7811,
             AssetFilterItem, CallHistoryCapabilities, CallHistoryEntry, CallHistoryTransaction,
@@ -201,6 +202,17 @@ pub trait RelayApi {
     /// spends our provider quota on the caller's behalf.
     #[method(name = "ethCall", with_extensions)]
     async fn eth_call(&self, parameters: EthCallParameters) -> RpcResult<Bytes>;
+
+    /// Report the caller's gas-sponsorship quota on a chain: cap, spend and
+    /// remaining wei in the rolling window, when the oldest spend ages out,
+    /// and the chain-wide breaker. Same reads `wallet_prepareCalls` decides on.
+    ///
+    /// `with_extensions` because the quota is keyed by the verified identity.
+    #[method(name = "sponsorshipQuota", with_extensions)]
+    async fn sponsorship_quota(
+        &self,
+        parameters: SponsorshipQuotaParameters,
+    ) -> RpcResult<SponsorshipQuotaResponse>;
 }
 
 /// Implementation of the Ithaca `relay_` namespace.
@@ -3744,6 +3756,28 @@ impl RelayApiServer for Relay {
             .map_err(RelayError::from)?;
 
         Ok(result)
+    }
+
+    async fn sponsorship_quota(
+        &self,
+        ext: &Extensions,
+        parameters: SponsorshipQuotaParameters,
+    ) -> RpcResult<SponsorshipQuotaResponse> {
+        let SponsorshipQuotaParameters { chain_id, account } = parameters;
+        tracing::Span::current().record("eth.chain_id", chain_id);
+
+        // The ledger is keyed by identity; an anonymous caller has none, and
+        // must not be able to read another account's spend.
+        let Some(sub) = ext.get::<VerifiedSub>() else {
+            return Err(RelayError::ReadRequiresAuth.into());
+        };
+
+        self.inner
+            .sponsorship
+            .quota_status(account, Some(sub.0.as_str()), chain_id)
+            .await
+            .map_err(RelayError::from)?
+            .ok_or_else(|| RelayError::QuotaNeedsAccount.into())
     }
 }
 

@@ -997,6 +997,26 @@ impl StorageApi for InMemoryStorage {
             .fold(U256::ZERO, |acc, u| acc + u.eth_spent);
         Ok(total)
     }
+
+    async fn sponsorship_window_start(
+        &self,
+        quota_subject: &str,
+        chain_id: ChainId,
+        window_hours: u64,
+    ) -> Result<Option<i64>> {
+        let cutoff = Utc::now().timestamp() - (window_hours as i64) * 3600;
+        let oldest = self
+            .sponsorship_usage
+            .read()
+            .await
+            .iter()
+            .filter(|u| {
+                u.quota_subject == quota_subject && u.chain_id == chain_id && u.at >= cutoff
+            })
+            .map(|u| u.at)
+            .min();
+        Ok(oldest)
+    }
 }
 
 /// An In-memory liquidity tracker.

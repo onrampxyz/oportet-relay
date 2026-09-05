@@ -161,6 +161,59 @@ impl SponsorshipConfig {
     }
 }
 
+/// Parameters of `wallet_sponsorshipQuota`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SponsorshipQuotaParameters {
+    /// Chain whose policy and ledger to report.
+    pub chain_id: ChainId,
+    /// The EOA the quota counts against under `quota_key = address`. Ignored
+    /// under `quota_key = user`, where the verified JWT `sub` is the subject.
+    #[serde(default)]
+    pub account: Option<Address>,
+}
+
+/// What a user is told about their gas sponsorship on one chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SponsorshipQuotaResponse {
+    /// Chain the numbers are for.
+    pub chain_id: ChainId,
+    /// Whether this chain sponsors gas at all (`sponsor_all` or in the
+    /// sponsored set). The caps below are meaningless when false.
+    pub sponsored: bool,
+    /// Policy escape hatch: everything is sponsored, no quota is enforced.
+    pub sponsor_all: bool,
+    /// Which identity the per-user cap counts against.
+    pub quota_key: QuotaKey,
+    /// Length of the rolling window, in hours.
+    pub window_hours: u64,
+    /// Per-user cap for the window (wei of native gas token).
+    pub cap_wei: U256,
+    /// Spent inside the window so far.
+    pub spent_wei: U256,
+    /// `cap_wei - spent_wei`, saturating.
+    pub remaining_wei: U256,
+    /// Unix seconds when the oldest sponsored transaction in the window ages
+    /// out, i.e. when `spent_wei` next drops. It is a rolling window, so this
+    /// is a partial release, not a full reset. `None` when nothing was spent.
+    pub resets_at: Option<u64>,
+    /// Chain-wide circuit breaker, which denies everyone when tripped.
+    pub breaker: SponsorshipBreakerStatus,
+}
+
+/// Chain-wide breaker state, reported alongside the per-user quota.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SponsorshipBreakerStatus {
+    /// Ceiling for the chain's total sponsored spend in the window.
+    pub cap_wei: U256,
+    /// Chain-wide spend inside the window.
+    pub spent_wei: U256,
+    /// `spent_wei >= cap_wei`: nobody is sponsored until spend ages out.
+    pub tripped: bool,
+}
+
 /// One sponsored transaction, recorded post-receipt.
 #[derive(Debug, Clone)]
 pub struct SponsorshipUsage {

@@ -81,6 +81,10 @@ pub enum RelayError {
     /// behalf.
     #[error("this method requires an authenticated session")]
     ReadRequiresAuth,
+    /// `wallet_sponsorshipQuota` under `quota_key = address` was called
+    /// without the `account` it should report on.
+    #[error("sponsorship quota on this chain is per account: pass `account`")]
+    QuotaNeedsAccount,
     /// The orchestrator is not supported.
     #[error("unsupported orchestrator {0}")]
     UnsupportedOrchestrator(Address),
@@ -172,7 +176,9 @@ impl From<RelayError> for jsonrpsee::types::error::ErrorObject<'static> {
             // Caller errors, not ours. Deliberately NOT internal_rpc: an
             // internal code tells a client "our fault, retry", and retrying an
             // unlisted contract or an anonymous read never succeeds.
-            RelayError::ReadNotAllowed { .. } => invalid_params(err.to_string()),
+            RelayError::ReadNotAllowed { .. } | RelayError::QuotaNeedsAccount => {
+                invalid_params(err.to_string())
+            }
             RelayError::ReadRequiresAuth => {
                 rpc_err(jsonrpsee::types::error::INVALID_REQUEST_CODE, err.to_string(), None)
             }

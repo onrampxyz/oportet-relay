@@ -13,7 +13,10 @@ use tracing::{debug, warn};
 use crate::{
     error::StorageError,
     storage::{RelayStorage, StorageApi},
-    types::{Call, ChainSponsorshipConfig, QuotaKey, SponsorshipConfig},
+    types::{
+        Call, ChainSponsorshipConfig, QuotaKey, SponsorshipBreakerStatus, SponsorshipConfig,
+        SponsorshipQuotaResponse,
+    },
 };
 
 /// Evaluates gas-sponsorship policy against the usage ledger.
@@ -150,6 +153,53 @@ impl SponsorshipEvaluator {
         }
 
         Ok(true)
+    }
+
+    /// What `wallet_sponsorshipQuota` reports: the same cap, window and ledger
+    /// reads `is_sponsored` decides on, so the number a user sees is the number
+    /// the relay enforces. `None` when no subject can be resolved (address
+    /// mode without an account, user mode without a verified user).
+    pub async fn quota_status(
+        &self,
+        eoa: Option<Address>,
+        user_id: Option<&str>,
+        chain_id: ChainId,
+    ) -> Result<Option<SponsorshipQuotaResponse>, StorageError> {
+        let cfg = self.config_for(chain_id);
+        let subject = match cfg.quota_key {
+            QuotaKey::Address => eoa.map(|a| a.to_string()),
+            QuotaKey::User => user_id.map(str::to_owned),
+        };
+        let Some(subject) = subject else { return Ok(None) };
+
+        let cap =
+            cfg.quota_overrides.get(&subject).copied().map(U256::from).unwrap_or(cfg.per_user_wei);
+        let spent =
+            self.storage.sponsored_wei_in_window(&subject, chain_id, cfg.window_hours).await?;
+        let global =
+            self.storage.global_sponsored_wei_in_window(chain_id, cfg.window_hours).await?;
+        let resets_at = self
+            .storage
+            .sponsorship_window_start(&subject, chain_id, cfg.window_hours)
+            .await?
+            .map(|oldest| oldest as u64 + cfg.window_hours * 3600);
+
+        Ok(Some(SponsorshipQuotaResponse {
+            chain_id,
+            sponsored: cfg.sponsor_all || cfg.sponsored_chains.contains(&chain_id),
+            sponsor_all: cfg.sponsor_all,
+            quota_key: cfg.quota_key,
+            window_hours: cfg.window_hours,
+            cap_wei: cap,
+            spent_wei: spent,
+            remaining_wei: cap.saturating_sub(spent),
+            resets_at,
+            breaker: SponsorshipBreakerStatus {
+                cap_wei: cfg.circuit_breaker_wei,
+                spent_wei: global,
+                tripped: global >= cfg.circuit_breaker_wei,
+            },
+        }))
     }
 }
 
@@ -378,5 +428,37 @@ mod tests {
         seed(&storage, "user-a", CHAIN, U256::from(600_000_000_000_000_000u128)).await;
         seed(&storage, "user-b", CHAIN, U256::from(600_000_000_000_000_000u128)).await;
         assert!(!eval.is_sponsored(EOA, Some(DEV_SUB), &[call_to(TARGET)], CHAIN).await.unwrap());
+    }
+
+    // The status endpoint reports the same cap/spend the decision path
+    // enforces, plus when the oldest spend ages out of the rolling window.
+    #[tokio::test]
+    async fn quota_status_reports_cap_spend_and_reset() {
+        let cfg = user_mode_cfg(); // per_user_wei = 0.01 ETH, breaker = 1 ETH
+        let (eval, storage) = evaluator(cfg);
+        let spent = U256::from(4_000_000_000_000_000u128); // 0.004 ETH
+        seed(&storage, DEV_SUB, CHAIN, spent).await;
+        let before = chrono::Utc::now().timestamp() as u64;
+
+        let status = eval.quota_status(None, Some(DEV_SUB), CHAIN).await.unwrap().unwrap();
+
+        assert!(status.sponsored && !status.sponsor_all);
+        assert_eq!(status.quota_key, QuotaKey::User);
+        assert_eq!(status.cap_wei, U256::from(10_000_000_000_000_000u128));
+        assert_eq!(status.spent_wei, spent);
+        assert_eq!(status.remaining_wei, U256::from(6_000_000_000_000_000u128));
+        assert_eq!(status.breaker.spent_wei, spent);
+        assert!(!status.breaker.tripped);
+        let resets_at = status.resets_at.expect("something was spent");
+        let window = status.window_hours * 3600;
+        assert!(resets_at + 5 >= before + window && resets_at <= before + window + 5);
+
+        // Nothing spent: no reset time, full cap remaining.
+        let fresh = eval.quota_status(None, Some("someone-else"), CHAIN).await.unwrap().unwrap();
+        assert_eq!(fresh.resets_at, None);
+        assert_eq!(fresh.remaining_wei, fresh.cap_wei);
+
+        // User mode with no verified user has no subject to report on.
+        assert!(eval.quota_status(Some(EOA), None, CHAIN).await.unwrap().is_none());
     }
 }

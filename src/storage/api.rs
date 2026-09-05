@@ -459,4 +459,15 @@ pub trait StorageApi: Debug + Send + Sync {
         chain_id: ChainId,
         window_hours: u64,
     ) -> Result<U256>;
+
+    /// Unix seconds of the OLDEST sponsored transaction a quota subject has on
+    /// a chain within the last `window_hours`; `None` when nothing was spent.
+    /// Drives the "resets at" a user sees: the rolling window next frees room
+    /// when that transaction ages out.
+    async fn sponsorship_window_start(
+        &self,
+        quota_subject: &str,
+        chain_id: ChainId,
+        window_hours: u64,
+    ) -> Result<Option<i64>>;
 }

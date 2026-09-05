@@ -2035,4 +2035,31 @@ impl StorageApi for PgStorage {
 
         Ok(numeric_to_u256(&row.total))
     }
+
+    async fn sponsorship_window_start(
+        &self,
+        quota_subject: &str,
+        chain_id: ChainId,
+        window_hours: u64,
+    ) -> Result<Option<i64>> {
+        // Runtime-checked query on purpose: a `query!` here would need the
+        // offline `.sqlx` metadata regenerated against a live database.
+        let row = sqlx::query(
+            r#"
+            SELECT EXTRACT(EPOCH FROM MIN(sponsored_at))::bigint AS oldest
+            FROM sponsorship_usage
+            WHERE quota_subject = $1
+              AND chain_id = $2
+              AND sponsored_at >= NOW() - make_interval(hours => $3::int)
+            "#,
+        )
+        .bind(quota_subject)
+        .bind(chain_id as i64)
+        .bind(window_hours as i32)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(eyre::Error::from)?;
+
+        Ok(row.try_get::<Option<i64>, _>("oldest").map_err(eyre::Error::from)?)
+    }
 }

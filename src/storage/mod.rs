@@ -470,6 +470,15 @@ impl StorageApi for RelayStorage {
     ) -> api::Result<U256> {
         self.inner.global_sponsored_wei_in_window(chain_id, window_hours).await
     }
+
+    async fn sponsorship_window_start(
+        &self,
+        quota_subject: &str,
+        chain_id: ChainId,
+        window_hours: u64,
+    ) -> api::Result<Option<i64>> {
+        self.inner.sponsorship_window_start(quota_subject, chain_id, window_hours).await
+    }
 }
 
 #[cfg(test)]
