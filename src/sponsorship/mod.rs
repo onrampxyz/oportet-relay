@@ -114,7 +114,11 @@ impl SponsorshipEvaluator {
         }
 
         // Target guard (fail-closed): only sponsor calls to our contract set.
-        if !Self::targets_allowed(&cfg, calls) {
+        // A verified identity may be let off the whitelist by policy: its
+        // spend is still bounded by the per-user quota and the breaker, while
+        // an anonymous caller has nothing but the target set to answer to.
+        let guard_waived = cfg.verified_skips_target_guard && user_id.is_some();
+        if !guard_waived && !Self::targets_allowed(&cfg, calls) {
             warn!(%eoa, chain_id, "sponsorship denied: call targets off our sponsored contract set");
             return Ok(false);
         }
@@ -205,6 +209,25 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    // A verified identity is let off the whitelist only when the policy says
+    // so; an anonymous caller stays on it either way.
+    #[tokio::test]
+    async fn verified_skips_target_guard_by_policy() {
+        let calls = [call_to(OFF_TARGET)];
+
+        let (strict, _) = evaluator(user_mode_cfg());
+        assert!(!strict.is_sponsored(EOA, Some(DEV_SUB), &calls, CHAIN).await.unwrap());
+
+        let mut cfg = user_mode_cfg();
+        cfg.verified_skips_target_guard = true;
+        cfg.quota_key = QuotaKey::Address;
+        let (relaxed, _) = evaluator(cfg);
+        assert!(relaxed.is_sponsored(EOA, Some(DEV_SUB), &calls, CHAIN).await.unwrap());
+        // No verified identity: the whitelist still applies.
+        assert!(!relaxed.is_sponsored(EOA, None, &calls, CHAIN).await.unwrap());
+        assert!(relaxed.is_sponsored(EOA, None, &[call_to(TARGET)], CHAIN).await.unwrap());
     }
 
     // (a) quota is tracked under the fixed dev sub, and (b) exceeding the

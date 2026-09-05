@@ -1033,6 +1033,26 @@ mod tests {
         assert_eq!(from_yaml.transactions, config.transactions);
     }
 
+    // The Railway deploy config is what production boots on; a typo there
+    // only shows up as a failed deploy otherwise.
+    #[test]
+    fn test_deploy_railway_yaml_parses() {
+        let s = include_str!("../deploy/railway/relay.yaml");
+        let config = serde_yaml::from_str::<RelayConfig>(s).unwrap();
+        assert!(!config.sponsorship.sponsor_all, "mainnet relay must not sponsor_all");
+        for id in [8453u64, 137, 4153] {
+            assert!(config.sponsorship.sponsored_chains.contains(&id), "chain {id} not sponsored");
+            let cfg = config.sponsorship.resolve(id, &config.chain_sponsorship);
+            assert!(!cfg.sponsor_all, "chain {id} must be gated");
+            assert!(!cfg.whitelisted_contracts.is_empty(), "chain {id} has no whitelist");
+            assert_eq!(cfg.quota_key, crate::types::QuotaKey::User);
+        }
+        for id in [84532u64, 11155931] {
+            assert!(config.sponsorship.resolve(id, &config.chain_sponsorship).sponsor_all);
+        }
+        assert!(config.auth.is_some());
+    }
+
     #[test]
     fn test_config_v22() {
         let s = include_str!("../tests/assets/config/v22.yaml");

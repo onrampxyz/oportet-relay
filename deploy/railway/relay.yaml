@@ -45,19 +45,77 @@ quote:
   # fail-closes after ~2 consecutive failures (worst-case stale price ~2.5min).
   rateTtl: 180
 
-# Gas-sponsorship policy. sponsor_all zeroes every eligible intent's fee (the
-# funder pays gas). Ceiling fields are required (not serde-defaulted). Flip
-# sponsor_all off + set quota_key: user for JWT-gated per-user quota.
+# Gas-sponsorship policy (Model A: an approved intent's fee is zeroed and the
+# funder pays gas). Mainnet is GATED: every sponsored call needs a verified
+# Better Auth identity (quota_key: user, JWT via `auth` below), spends against a
+# per-user rolling quota and a per-chain breaker, and a verified user may call
+# any target (verified_skips_target_guard) - an anonymous caller stays on the
+# per-chain whitelist below. Ceilings are wei of the chain's NATIVE asset and are
+# sized per chain under chain_sponsorship (POL on Polygon is not ETH). The
+# testnets keep sponsor_all through their overrides.
 sponsorship:
-  sponsor_all: true
-  circuit_breaker_wei: "1000000000000000000"
-  per_user_wei: "10000000000000000"
+  sponsor_all: false
+  sponsored_chains: [8453, 137, 4153, 84532, 11155931]
+  quota_key: user
+  verified_skips_target_guard: true
   window_hours: 24
+  # ETH-chain defaults (Base): ~$0.01-0.02 per intent at 0.006 gwei + L1 data.
+  # 0.002 ETH/user/day (~$5, a few hundred intents); 0.1 ETH/day breaker (~$250).
+  per_user_wei: "2000000000000000"
+  circuit_breaker_wei: "100000000000000000"
 
-# Better Auth JWKS for verifying user bearer tokens (user-mode quota). Harmless
-# under sponsor_all: an unverifiable/absent bearer just falls back to
-# address-mode. Points at production; the jwt() plugin must be live there for
-# user-mode to actually key by user.
+chain_sponsorship:
+  # Base mainnet: defaults above. Whitelist = what an ANONYMOUS caller may hit.
+  8453:
+    whitelisted_contracts:
+      - "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" # USDC (Circle)
+      - "0x000000000022D473030F116dDEE9F6B43aC78BA3" # Permit2
+  # Polygon mainnet: gas is POL at ~280 gwei, ~0.1 POL (~$0.01) per intent.
+  # 20 POL/user/day (~$2); 1000 POL/day breaker (~$95).
+  137:
+    per_user_wei: "20000000000000000000"
+    circuit_breaker_wei: "1000000000000000000000"
+    whitelisted_contracts:
+      - "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" # USDC.e
+      - "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359" # USDC (Circle)
+      - "0x000000000022D473030F116dDEE9F6B43aC78BA3" # Permit2
+      # Polymarket set (apps/expo/src/lib/polymarket/constants.ts)
+      - "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB" # pUSD
+      - "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045" # ConditionalTokens
+      - "0xE111180000d2663C0091e4f400237545B87B996B" # CTF exchange
+      - "0xe2222d279d744050d28e00520010520000310F59" # neg-risk exchange
+      - "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296" # neg-risk adapter
+      - "0x3A3BD7bb9528E159577F7C2e685CC81A765002E2" # wrapped collateral
+      - "0x93070a847efEf7F70739046A929D47a521F5B8ee" # collateral onramp
+      - "0x2957922Eb93258b93368531d39fAcCA3B4dC5854" # collateral offramp
+      - "0xAdA100Db00Ca00073811820692005400218FcE1f" # CTF collateral adapter
+      - "0xadA2005600Dec949baf300f4C6120000bDB6eAab" # neg-risk CTF collateral adapter
+      - "0x00000000000Fb5C9ADea0298D729A0CB3823Cc07" # deposit-wallet factory
+  # Rise mainnet: gas is dust (0.0004 gwei), ~1e-7 ETH per intent.
+  # 0.0005 ETH/user/day (~$1.2, thousands of intents); 0.02 ETH/day breaker (~$50).
+  4153:
+    per_user_wei: "500000000000000"
+    circuit_breaker_wei: "20000000000000000"
+    whitelisted_contracts:
+      # RiseX mainnet (apps/expo/src/lib/constants.ts RISEX_MAINNET_CONTRACTS)
+      - "0x53f10fAcFC8965750494E6965F5d6dA39B41d852" # PerpsManager
+      - "0x0D919DAA3f12AE715744Eb648c00066c5DBd66f0" # Auth
+      - "0xe436820ba0C69702c1d3E601d421c0eF38262739" # USDC.e
+      - "0x2C03C7d7e2974C6599b6B108879109281ef3F818" # CollateralManager
+      - "0x11541dc387b9C307043ea732127DF92b80bab52b" # FeeManager
+      - "0x000000000022D473030F116dDEE9F6B43aC78BA3" # Permit2
+  # Testnets stay open: the faucet, the e2e fork and the dev loop rely on it.
+  84532:
+    sponsor_all: true
+  11155931:
+    sponsor_all: true
+
+# Better Auth JWKS for verifying user bearer tokens. Load-bearing on mainnet
+# now: quota_key is user, so an absent or unverifiable bearer is DENIED
+# sponsorship and the user pays the fee token. The app attaches the JWT on every
+# relay call (apps/expo/src/lib/porto.ts setRelayAuthToken). Unknown kids
+# refresh the JWKS once, so key rotation needs no restart. The dev hatch
+# (dev_api_key) stays off: dev builds carry real JWTs.
 auth:
   jwks_url: "https://onramp.xyz/api/auth/jwks"
 
@@ -119,6 +177,12 @@ chains:
       ethereum:
         address: "0x0000000000000000000000000000000000000000"
         fee_token: true
+      # Circle USDC on Base. fee_token so a session key may nominate it (oportet
+      # infers the fee token from spend[0]); uid = CoinGecko id for the oracle.
+      usd-coin:
+        address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        decimals: 6
+        fee_token: true
     signers:
       num_signers: 3
   # Polygon mainnet. Native gas asset is POL.
@@ -128,6 +192,16 @@ chains:
     assets:
       pol:
         address: "0x0000000000000000000000000000000000000000"
+        fee_token: true
+      # Circle USDC (native) and USDC.e (bridged, Polymarket collateral), both
+      # fee tokens; distinct CoinGecko ids so each prices on its own.
+      usd-coin:
+        address: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+        decimals: 6
+        fee_token: true
+      bridged-usdc-polygon-pos-bridge:
+        address: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+        decimals: 6
         fee_token: true
     signers:
       num_signers: 3
@@ -139,6 +213,12 @@ chains:
     assets:
       ethereum:
         address: "0x0000000000000000000000000000000000000000"
+        fee_token: true
+      # RiseX mainnet USDC.e (the system-config quote token); decimals read
+      # on-chain (6), symbol USDC.e. uid = CoinGecko id for the oracle.
+      usd-coin:
+        address: "0xe436820ba0C69702c1d3E601d421c0eF38262739"
+        decimals: 6
         fee_token: true
     signers:
       num_signers: 3

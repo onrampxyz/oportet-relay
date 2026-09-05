@@ -61,6 +61,12 @@ pub struct SponsorshipConfig {
     /// Which identity the per-user quota counts against.
     #[serde(default)]
     pub quota_key: QuotaKey,
+    /// Relax the target guard for callers with a VERIFIED identity (JWT `sub`
+    /// or the dev hatch): their calls may land anywhere, bounded by the
+    /// per-user quota and the breaker alone. Anonymous (address-mode) callers
+    /// stay on the whitelist. Off by default (fail-closed).
+    #[serde(default)]
+    pub verified_skips_target_guard: bool,
     /// Per-subject quota overrides (subject -> wei per window). A subject listed
     /// here uses this ceiling instead of `per_user_wei`; subjects not listed use
     /// `per_user_wei`. Used to cap a specific identity — notably the dev
@@ -82,6 +88,7 @@ impl Default for SponsorshipConfig {
             per_user_wei: U256::from(10_000_000_000_000_000u128),           // 0.01 ETH / window
             window_hours: 24,
             quota_key: QuotaKey::Address,
+            verified_skips_target_guard: false,
             quota_overrides: HashMap::new(),
         }
     }
@@ -112,6 +119,9 @@ pub struct ChainSponsorshipConfig {
     /// Override for [`SponsorshipConfig::quota_key`].
     #[serde(default)]
     pub quota_key: Option<QuotaKey>,
+    /// Override for [`SponsorshipConfig::verified_skips_target_guard`].
+    #[serde(default)]
+    pub verified_skips_target_guard: Option<bool>,
 }
 
 impl SponsorshipConfig {
@@ -142,6 +152,9 @@ impl SponsorshipConfig {
             per_user_wei: o.per_user_wei.unwrap_or(self.per_user_wei),
             window_hours: o.window_hours.unwrap_or(self.window_hours),
             quota_key: o.quota_key.unwrap_or(self.quota_key),
+            verified_skips_target_guard: o
+                .verified_skips_target_guard
+                .unwrap_or(self.verified_skips_target_guard),
             // Per-subject overrides are relay-global, not per-chain overridable.
             quota_overrides: self.quota_overrides.clone(),
         }
