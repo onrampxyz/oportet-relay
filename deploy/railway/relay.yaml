@@ -116,6 +116,14 @@ chain_sponsorship:
 # relay call (apps/expo/src/lib/porto.ts setRelayAuthToken). Unknown kids
 # refresh the JWKS once, so key rotation needs no restart. The dev hatch
 # (dev_api_key) stays off: dev builds carry real JWTs.
+# CoinGecko has no coin called "pol": without this remap POL never gets a USD
+# price, every Polygon fee token fails its native conversion, and
+# wallet_getCapabilities lists only the native token on 137.
+pricefeed:
+  coingecko:
+    remapping:
+      pol: polygon-ecosystem-token
+
 auth:
   jwks_url: "https://onramp.xyz/api/auth/jwks"
 

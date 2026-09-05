@@ -1051,6 +1051,12 @@ mod tests {
             assert!(config.sponsorship.resolve(id, &config.chain_sponsorship).sponsor_all);
         }
         assert!(config.auth.is_some());
+        // Without this remap POL has no USD price and Polygon lists no fee token
+        // but its native one (seen live on 2026-09-05).
+        assert_eq!(
+            config.pricefeed.coingecko.remapping.get(&AssetUid::new("pol".into())),
+            Some(&"polygon-ecosystem-token".to_string())
+        );
     }
 
     #[test]
