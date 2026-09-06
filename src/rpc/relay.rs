@@ -19,17 +19,17 @@ use crate::{
         Key, MULTICHAIN_NONCE_PREFIX, MerkleLeafInfo,
         OrchestratorContract::{self, IntentExecuted},
         Quotes, SignedCall, SignedCalls, SourcedAsset, SponsorshipQuotaParameters,
-        SponsorshipQuotaResponse, Transfer, VersionedContracts,
+        SponsorshipQuotaResponse, SponsorshipUsage, Transfer, VersionedContracts,
         rpc::{
             AddFaucetFundsParameters, AddFaucetFundsResponse, AddressOrNative, Asset7811,
             AssetFilterItem, CallHistoryCapabilities, CallHistoryEntry, CallHistoryTransaction,
             CallKey, CallReceipt, CallStatusCode, ChainCapabilities, ChainFeeToken, ChainFees,
-            GetAssetsParameters, GetAssetsResponse, GetAuthorizationParameters,
-            GetAuthorizationResponse, GetCallsHistoryParameters, GetCallsHistoryResponse, Meta,
-            PreCallContext, PrepareCallsCapabilities, PrepareCallsContext,
-            PrepareUpgradeAccountResponse, RelayCapabilities, RequiredAsset,
-            SendPreparedCallsCapabilities, SortDirection, UpgradeAccountContext,
-            UpgradeAccountDigests, ValidSignatureProof,
+            ExecutePreCallsParameters, ExecutePreCallsResponse, GetAssetsParameters,
+            GetAssetsResponse, GetAuthorizationParameters, GetAuthorizationResponse,
+            GetCallsHistoryParameters, GetCallsHistoryResponse, Meta, PreCallContext,
+            PrepareCallsCapabilities, PrepareCallsContext, PrepareUpgradeAccountResponse,
+            RelayCapabilities, RequiredAsset, SendPreparedCallsCapabilities, SortDirection,
+            UpgradeAccountContext, UpgradeAccountDigests, ValidSignatureProof,
         },
     },
     version::RELAY_SHORT_VERSION,
@@ -213,6 +213,23 @@ pub trait RelayApi {
         &self,
         parameters: SponsorshipQuotaParameters,
     ) -> RpcResult<SponsorshipQuotaResponse>;
+
+    /// Land every precall stored for `address` on `chainId` in one relay-paid
+    /// transaction, without an intent from the user.
+    ///
+    /// A stored precall is otherwise only pulled into the next intent signed by
+    /// the key it authorizes (`wallet_prepareCalls`), so a key granted to a signer
+    /// the app never holds, such as a recovery key kept in a hardware wallet, would
+    /// sit in storage and never reach the chain. On a chain the account is not
+    /// delegated on yet, the 7702 authorization and the init precall ride along.
+    ///
+    /// The relay's funder pays the gas, so the call is gated by the sponsorship
+    /// policy and booked against the caller's quota, hence `with_extensions`.
+    #[method(name = "executePreCalls", with_extensions)]
+    async fn execute_pre_calls(
+        &self,
+        parameters: ExecutePreCallsParameters,
+    ) -> RpcResult<ExecutePreCallsResponse>;
 }
 
 /// Implementation of the Ithaca `relay_` namespace.
@@ -3756,6 +3773,155 @@ impl RelayApiServer for Relay {
             .map_err(RelayError::from)?;
 
         Ok(result)
+    }
+
+    async fn execute_pre_calls(
+        &self,
+        ext: &Extensions,
+        parameters: ExecutePreCallsParameters,
+    ) -> RpcResult<ExecutePreCallsResponse> {
+        let ExecutePreCallsParameters { address: eoa, chain_id } = parameters;
+        tracing::Span::current().record("eth.chain_id", chain_id);
+        let user_id = ext.get::<VerifiedSub>().map(|sub| sub.0.as_str());
+
+        let chain =
+            self.inner.chains.get(chain_id).ok_or(RelayError::UnsupportedChain(chain_id))?;
+        let provider = self.provider(chain_id)?;
+
+        let stored = self.inner.storage.read_precalls_for_eoa(chain_id, eoa).await?;
+        if stored.is_empty() {
+            return Err(RelayError::NoStoredPreCalls { eoa, chain: chain_id }.into());
+        }
+
+        // Not delegated here yet: the transaction carries the account's 7702
+        // authorization, and the init precall runs first, the order a first
+        // intent uses in `prepare_calls`.
+        let mut account = Account::new(eoa, &provider);
+        let (mut pre_calls, authorization_list) =
+            match self.delegation_status(&eoa, chain_id).await? {
+                DelegationStatus::Delegated { .. } => (Vec::new(), Vec::new()),
+                DelegationStatus::Stored { account: creatable, .. } => {
+                    account = account.with_overrides(creatable.state_overrides()?);
+                    (vec![creatable.pre_call.clone()], vec![creatable.signed_authorization.clone()])
+                }
+                DelegationStatus::None { .. } => {
+                    return Err(RelayError::Auth(AuthError::EoaNotDelegated(eoa).boxed()).into());
+                }
+            };
+
+        // Per sequence, keep the precalls whose nonce continues the on-chain
+        // count. A consumed nonce is stale and leaves storage; a gap means an
+        // earlier signature is missing, so that sequence stops there.
+        let mut executable = Vec::new();
+        for (seq_key, calls) in stored
+            .into_iter()
+            .sorted_by_key(|call| call.nonce)
+            .into_group_map_by(|call| call.nonce >> 64)
+        {
+            let mut nonce = account
+                .get_nonce_for_sequence(U192::from(seq_key))
+                .await
+                .map_err(RelayError::from)?;
+            for call in calls {
+                if call.nonce == nonce {
+                    executable.push(call);
+                    nonce += U256::from(1);
+                } else if call.nonce < nonce {
+                    self.inner.storage.remove_precall(chain_id, eoa, call.nonce).await?;
+                } else {
+                    break;
+                }
+            }
+        }
+        if executable.is_empty() {
+            return Err(RelayError::NoStoredPreCalls { eoa, chain: chain_id }.into());
+        }
+
+        let calls = executable
+            .iter()
+            .map(|call| call.calls())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(RelayError::from)?
+            .concat();
+        if !self.inner.sponsorship.is_sponsored(eoa, user_id, &calls, chain_id).await? {
+            return Err(RelayError::PreCallsNotSponsored { eoa, chain: chain_id }.into());
+        }
+
+        let nonces = executable.iter().map(|call| call.nonce).collect::<Vec<_>>();
+        pre_calls.extend(executable);
+
+        // The orchestrator the account points at is the one `send_prepared_calls`
+        // computed the stored digests against.
+        let orchestrator = account.get_orchestrator().await.map_err(RelayError::from)?;
+        let calldata: Bytes =
+            OrchestratorContract::executePreCallsCall { parentEOA: eoa, preCalls: pre_calls }
+                .abi_encode()
+                .into();
+
+        let mut request =
+            TransactionRequest::default().to(orchestrator).input(calldata.clone().into());
+        if !authorization_list.is_empty() {
+            request.authorization_list = Some(authorization_list.clone());
+        }
+        let gas_limit = provider.estimate_gas(request).await.map_err(RelayError::from)?;
+
+        let quota_subject = self.inner.sponsorship.resolve_quota_subject(eoa, user_id, chain_id);
+        let tx = RelayTransaction::new_internal(
+            TxKind::Call(orchestrator),
+            calldata,
+            chain_id,
+            gas_limit,
+        )
+        .with_authorization_list(authorization_list)
+        .with_quota_subject(quota_subject.clone());
+
+        let handle = chain.transactions().clone();
+        handle.send_transaction(tx.clone()).await.map_err(RelayError::from)?;
+        let status = handle.wait_for_tx(tx.id).await.map_err(|_| {
+            RelayError::InternalError(eyre::eyre!("failed to wait for transaction"))
+        })?;
+        let receipt = match status {
+            TransactionStatus::Confirmed(receipt) if receipt.status() => receipt,
+            TransactionStatus::Confirmed(receipt) => {
+                return Err(RelayError::InternalError(eyre::eyre!(
+                    "precall execution {} reverted on chain {chain_id}",
+                    receipt.transaction_hash
+                ))
+                .into());
+            }
+            other => {
+                return Err(RelayError::InternalError(eyre::eyre!(
+                    "precall execution for {eoa} on chain {chain_id} did not confirm ({:?})",
+                    other.tx_hash()
+                ))
+                .into());
+            }
+        };
+
+        // The signer's confirmed-metrics recorder only books intents, so this
+        // relay-paid transaction is booked against the same ledger here.
+        if let Some(quota_subject) = quota_subject {
+            let gas_used = U256::from(receipt.gas_used);
+            let gas_price = U256::from(receipt.effective_gas_price);
+            self.inner
+                .storage
+                .record_sponsorship_usage(SponsorshipUsage {
+                    user_address: eoa,
+                    quota_subject,
+                    chain_id,
+                    tx_hash: receipt.transaction_hash.to_string(),
+                    gas_used,
+                    gas_price,
+                    eth_spent: gas_used * gas_price,
+                })
+                .await?;
+        }
+
+        for nonce in &nonces {
+            self.inner.storage.remove_precall(chain_id, eoa, *nonce).await?;
+        }
+
+        Ok(ExecutePreCallsResponse { transaction_hash: receipt.transaction_hash, nonces })
     }
 
     async fn sponsorship_quota(

@@ -85,6 +85,24 @@ pub enum RelayError {
     /// without the `account` it should report on.
     #[error("sponsorship quota on this chain is per account: pass `account`")]
     QuotaNeedsAccount,
+    /// `wallet_executePreCalls` found nothing to land: no precall is stored for
+    /// the account on that chain, or every stored one is already consumed.
+    #[error("no stored precalls for {eoa} on chain {chain}")]
+    NoStoredPreCalls {
+        /// The account.
+        eoa: Address,
+        /// The chain.
+        chain: ChainId,
+    },
+    /// `wallet_executePreCalls` is paid by the relay, and the sponsorship
+    /// policy declined to pay for this caller.
+    #[error("executing precalls for {eoa} on chain {chain} is not sponsored")]
+    PreCallsNotSponsored {
+        /// The account.
+        eoa: Address,
+        /// The chain.
+        chain: ChainId,
+    },
     /// The orchestrator is not supported.
     #[error("unsupported orchestrator {0}")]
     UnsupportedOrchestrator(Address),
@@ -176,9 +194,10 @@ impl From<RelayError> for jsonrpsee::types::error::ErrorObject<'static> {
             // Caller errors, not ours. Deliberately NOT internal_rpc: an
             // internal code tells a client "our fault, retry", and retrying an
             // unlisted contract or an anonymous read never succeeds.
-            RelayError::ReadNotAllowed { .. } | RelayError::QuotaNeedsAccount => {
-                invalid_params(err.to_string())
-            }
+            RelayError::ReadNotAllowed { .. }
+            | RelayError::QuotaNeedsAccount
+            | RelayError::NoStoredPreCalls { .. }
+            | RelayError::PreCallsNotSponsored { .. } => invalid_params(err.to_string()),
             RelayError::ReadRequiresAuth => {
                 rpc_err(jsonrpsee::types::error::INVALID_REQUEST_CODE, err.to_string(), None)
             }

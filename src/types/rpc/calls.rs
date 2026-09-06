@@ -794,6 +794,27 @@ pub struct CallHistoryCapabilities {
     pub quotes: Vec<Quote>,
 }
 
+/// Parameters for the `wallet_executePreCalls` method.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutePreCallsParameters {
+    /// The account whose stored precalls should be executed.
+    pub address: Address,
+    /// The chain to execute them on.
+    #[serde(with = "alloy::serde::quantity")]
+    pub chain_id: ChainId,
+}
+
+/// Response for the `wallet_executePreCalls` method.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutePreCallsResponse {
+    /// The relay transaction that executed the precalls.
+    pub transaction_hash: alloy::primitives::TxHash,
+    /// Nonces of the precalls that landed.
+    pub nonces: Vec<U256>,
+}
+
 #[cfg(test)]
 mod tests {
     use crate::types::{

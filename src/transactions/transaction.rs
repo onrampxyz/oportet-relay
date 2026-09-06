@@ -49,6 +49,11 @@ pub enum RelayTransactionKind {
         gas_limit: u64,
         /// Value to send with the transaction.
         value: U256,
+        /// EIP-7702 [`SignedAuthorization`]s to attach. Empty for every internal
+        /// transaction except a relay-paid precall execution on a chain the
+        /// account is not delegated on yet.
+        #[serde(default)]
+        authorization_list: Vec<SignedAuthorization>,
     },
 }
 
@@ -122,6 +127,15 @@ impl RelayTransaction {
         self
     }
 
+    /// Attach EIP-7702 authorizations to an internal transaction. No-op for an
+    /// intent, which carries its own list.
+    pub fn with_authorization_list(mut self, list: Vec<SignedAuthorization>) -> Self {
+        if let RelayTransactionKind::Internal { authorization_list, .. } = &mut self.kind {
+            *authorization_list = list;
+        }
+        self
+    }
+
     /// Create a new [`RelayTransaction`] for an internal transaction.
     pub fn new_internal(
         kind: impl Into<TxKind>,
@@ -148,6 +162,7 @@ impl RelayTransaction {
                 chain_id,
                 gas_limit,
                 value,
+                authorization_list: Vec::new(),
             },
             trace_context: Context::current(),
             received_at: Utc::now(),
@@ -207,19 +222,43 @@ impl RelayTransaction {
                     .into()
                 }
             }
-            RelayTransactionKind::Internal { kind, input, chain_id, gas_limit, value } => {
-                TxEip1559 {
-                    chain_id: *chain_id,
-                    nonce,
-                    to: *kind,
-                    input: input.clone(),
-                    gas_limit: *gas_limit,
-                    max_fee_per_gas: fees.max_fee_per_gas,
-                    max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
-                    value: *value,
-                    access_list: Default::default(),
+            RelayTransactionKind::Internal {
+                kind,
+                input,
+                chain_id,
+                gas_limit,
+                value,
+                authorization_list,
+            } => {
+                // EIP-7702 has no create form, so a list only rides on a call.
+                if let (false, Some(to)) = (authorization_list.is_empty(), kind.to()) {
+                    TxEip7702 {
+                        authorization_list: authorization_list.clone(),
+                        chain_id: *chain_id,
+                        nonce,
+                        to: *to,
+                        input: input.clone(),
+                        gas_limit: *gas_limit,
+                        max_fee_per_gas: fees.max_fee_per_gas,
+                        max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
+                        value: *value,
+                        access_list: Default::default(),
+                    }
+                    .into()
+                } else {
+                    TxEip1559 {
+                        chain_id: *chain_id,
+                        nonce,
+                        to: *kind,
+                        input: input.clone(),
+                        gas_limit: *gas_limit,
+                        max_fee_per_gas: fees.max_fee_per_gas,
+                        max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
+                        value: *value,
+                        access_list: Default::default(),
+                    }
+                    .into()
                 }
-                .into()
             }
         }
     }

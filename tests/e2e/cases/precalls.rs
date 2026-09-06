@@ -1,0 +1,218 @@
+//! `wallet_executePreCalls`: landing stored precalls with a relay-paid transaction.
+//!
+//! A precall stored through `wallet_sendPreparedCalls` only reaches the chain
+//! inside the next intent signed by the key it authorizes. These cases cover
+//! the key nobody in the app can sign with: a recovery key granted as admin,
+//! held in a wallet the relay never sees.
+
+use crate::e2e::{
+    AuthKind,
+    cases::{upgrade_account_eagerly, upgrade_account_lazily},
+    environment::Environment,
+    send_prepared_calls,
+};
+use alloy::primitives::{B256, U256};
+use relay::{
+    rpc::RelayApiClient,
+    signers::Eip712PayLoadSigner,
+    types::{
+        KeyType, KeyWith712Signer, MULTICHAIN_NONCE_PREFIX, SignedCalls, SponsorshipConfig,
+        rpc::{
+            ExecutePreCallsParameters, Meta, PrepareCallsCapabilities, PrepareCallsParameters,
+            PrepareCallsResponse,
+        },
+    },
+};
+
+/// The nonce shape the relay mints for its own account-creation precall: the
+/// multichain prefix, a random sequence key, sequence 0. It drops the chain id
+/// from the digest, so one signature stores on every chain.
+fn multichain_precall_nonce() -> U256 {
+    (MULTICHAIN_NONCE_PREFIX << 240) | ((U256::from_be_bytes(B256::random().into()) >> 80) << 64)
+}
+
+/// The relay pays for `wallet_executePreCalls`, so the sponsorship policy is
+/// its gate; the e2e default sponsors nothing.
+async fn sponsor_everything(env: &mut Environment) -> eyre::Result<()> {
+    let mut config = env.config.clone();
+    config.sponsorship = SponsorshipConfig { sponsor_all: true, ..Default::default() };
+    env.restart_relay(config).await
+}
+
+/// Prepares a precall granting `recovery` as admin on `chain_id`, under `nonce`.
+async fn prepare_admin_grant(
+    env: &Environment,
+    admin: &KeyWith712Signer,
+    recovery: &KeyWith712Signer,
+    chain_id: u64,
+    nonce: U256,
+) -> eyre::Result<PrepareCallsResponse> {
+    let response = env
+        .relay_endpoint
+        .prepare_calls(PrepareCallsParameters {
+            from: Some(env.eoa.address()),
+            calls: vec![],
+            chain_id,
+            capabilities: PrepareCallsCapabilities {
+                authorize_keys: vec![recovery.to_authorized()],
+                revoke_keys: vec![],
+                meta: Meta { fee_payer: None, fee_token: Some(env.fee_token), nonce: Some(nonce) },
+                pre_calls: vec![],
+                pre_call: true,
+                required_funds: vec![],
+            },
+            state_overrides: Default::default(),
+            balance_overrides: Default::default(),
+            key: Some(admin.to_call_key()),
+        })
+        .await?;
+
+    let precall = response.context.clone().take_precall().expect("a precall context");
+    assert!(precall.call.is_multichain(), "a client nonce with the prefix must be kept verbatim");
+
+    Ok(response)
+}
+
+/// Stores a precall that grants `recovery` as admin, signed by `admin`.
+async fn store_admin_grant(
+    env: &Environment,
+    admin: &KeyWith712Signer,
+    recovery: &KeyWith712Signer,
+) -> eyre::Result<()> {
+    let response =
+        prepare_admin_grant(env, admin, recovery, env.chain_id(), multichain_precall_nonce())
+            .await?;
+    let signature = admin.sign_payload_hash(response.digest).await?;
+    send_prepared_calls(env, admin, signature, response.context).await?;
+
+    Ok(())
+}
+
+async fn execute(env: &Environment) -> eyre::Result<Vec<U256>> {
+    Ok(env
+        .relay_endpoint
+        .execute_pre_calls(ExecutePreCallsParameters {
+            address: env.eoa.address(),
+            chain_id: env.chain_id(),
+        })
+        .await?
+        .nonces)
+}
+
+async fn assert_recovery_key_on_chain(
+    env: &Environment,
+    recovery: &KeyWith712Signer,
+    expected: bool,
+) {
+    let keys = env.get_eoa_authorized_keys().await.unwrap();
+    let found = keys.iter().find(|key| key.hash == recovery.key_hash());
+
+    assert_eq!(found.is_some(), expected, "recovery key on chain");
+
+    if let Some(found) = found {
+        assert!(found.authorize_key.key.isSuperAdmin, "granted as admin");
+    }
+}
+
+/// The account has never been used on this chain: the relay must carry the 7702
+/// authorization and the init precall alongside the stored grant.
+#[tokio::test(flavor = "multi_thread")]
+async fn lands_a_stored_grant_on_an_undelegated_account() -> eyre::Result<()> {
+    let mut env = Environment::setup().await?;
+    sponsor_everything(&mut env).await?;
+
+    let admin = KeyWith712Signer::random_admin(KeyType::Secp256k1)?.unwrap();
+    let recovery = KeyWith712Signer::random_admin(KeyType::Secp256k1)?.unwrap();
+    upgrade_account_lazily(&env, &[admin.to_authorized()], AuthKind::Auth).await?;
+
+    store_admin_grant(&env, &admin, &recovery).await?;
+    assert_recovery_key_on_chain(&env, &recovery, false).await;
+
+    assert_eq!(execute(&env).await?.len(), 1);
+    assert_recovery_key_on_chain(&env, &recovery, true).await;
+
+    // Landed precalls leave storage, so a second call has nothing to do.
+    assert!(execute(&env).await.is_err_and(|err| err.to_string().contains("no stored precalls")));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lands_a_stored_grant_on_a_delegated_account() -> eyre::Result<()> {
+    let mut env = Environment::setup().await?;
+    sponsor_everything(&mut env).await?;
+
+    let admin = KeyWith712Signer::random_admin(KeyType::Secp256k1)?.unwrap();
+    let recovery = KeyWith712Signer::random_admin(KeyType::Secp256k1)?.unwrap();
+    upgrade_account_eagerly(&env, &[admin.to_authorized()], &admin, AuthKind::Auth).await?;
+
+    store_admin_grant(&env, &admin, &recovery).await?;
+    assert_recovery_key_on_chain(&env, &recovery, false).await;
+
+    assert_eq!(execute(&env).await?.len(), 1);
+    assert_recovery_key_on_chain(&env, &recovery, true).await;
+
+    Ok(())
+}
+
+/// Storing costs the relay nothing; landing does, so the policy decides.
+#[tokio::test(flavor = "multi_thread")]
+async fn refuses_to_land_when_not_sponsored() -> eyre::Result<()> {
+    let env = Environment::setup().await?;
+
+    let admin = KeyWith712Signer::random_admin(KeyType::Secp256k1)?.unwrap();
+    let recovery = KeyWith712Signer::random_admin(KeyType::Secp256k1)?.unwrap();
+    upgrade_account_eagerly(&env, &[admin.to_authorized()], &admin, AuthKind::Auth).await?;
+
+    store_admin_grant(&env, &admin, &recovery).await?;
+
+    assert!(execute(&env).await.is_err_and(|err| err.to_string().contains("not sponsored")));
+    assert_recovery_key_on_chain(&env, &recovery, false).await;
+
+    Ok(())
+}
+
+/// What the multichain nonce buys: one signature, stored on every chain, landed
+/// on every chain, with no per-chain ceremony.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_signature_lands_on_every_chain() -> eyre::Result<()> {
+    let mut env = Environment::setup_multi_chain(2).await?;
+    sponsor_everything(&mut env).await?;
+
+    let admin = KeyWith712Signer::random_admin(KeyType::Secp256k1)?.unwrap();
+    let recovery = KeyWith712Signer::random_admin(KeyType::Secp256k1)?.unwrap();
+    upgrade_account_lazily(&env, &[admin.to_authorized()], AuthKind::Auth).await?;
+
+    let nonce = multichain_precall_nonce();
+    let mut digests = Vec::new();
+    let mut contexts = Vec::new();
+    for index in 0..env.num_chains() {
+        let response =
+            prepare_admin_grant(&env, &admin, &recovery, env.chain_id_for(index), nonce).await?;
+        digests.push(response.digest);
+        contexts.push(response.context);
+    }
+    assert!(digests.iter().all(|digest| digest == &digests[0]), "no chain id in the digest");
+
+    let signature = admin.sign_payload_hash(digests[0]).await?;
+    for context in contexts {
+        send_prepared_calls(&env, &admin, signature.clone(), context).await?;
+    }
+
+    for index in 0..env.num_chains() {
+        env.relay_endpoint
+            .execute_pre_calls(ExecutePreCallsParameters {
+                address: env.eoa.address(),
+                chain_id: env.chain_id_for(index),
+            })
+            .await?;
+
+        let keys = env.get_eoa_authorized_keys_on_chain(index).await?;
+        assert!(
+            keys.iter().any(|key| key.hash == recovery.key_hash()),
+            "recovery key on chain {index}"
+        );
+    }
+
+    Ok(())
+}
