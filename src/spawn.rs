@@ -395,12 +395,14 @@ mod tests {
     }
 
     fn cfg_with_hatch(dev_subject: Option<&str>, override_wei: Option<u128>) -> RelayConfig {
-        let mut config = RelayConfig::default();
-        config.auth = Some(AuthConfig {
-            jwks_url: "http://127.0.0.1:1/jwks".to_string(),
-            dev_api_key: Some("dev-secret".to_string()),
-            dev_subject: dev_subject.map(str::to_owned),
-        });
+        let mut config = RelayConfig {
+            auth: Some(AuthConfig {
+                jwks_url: "http://127.0.0.1:1/jwks".to_string(),
+                dev_api_key: Some("dev-secret".to_string()),
+                dev_subject: dev_subject.map(str::to_owned),
+            }),
+            ..Default::default()
+        };
         if let Some(wei) = override_wei {
             let subject = dev_subject.unwrap_or("dev-local").to_string();
             config.sponsorship.quota_overrides.insert(subject, wei);

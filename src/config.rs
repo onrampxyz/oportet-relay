@@ -414,9 +414,9 @@ impl RelayConfig {
         // the yaml carries only a public fallback endpoint.
         for (chain, chain_config) in config.chains.iter_mut() {
             if let Ok(url) = std::env::var(format!("RPC_{}", chain.id())) {
-                chain_config.endpoint = url
-                    .parse()
-                    .wrap_err_with(|| format!("invalid RPC_{} endpoint URL from env", chain.id()))?;
+                chain_config.endpoint = url.parse().wrap_err_with(|| {
+                    format!("invalid RPC_{} endpoint URL from env", chain.id())
+                })?;
             }
         }
         Ok(config)

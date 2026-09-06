@@ -269,8 +269,7 @@ impl LayerZeroVerificationMonitor {
             // Independent liveness poll (see `PACKET_AVAILABILITY_POLL_INTERVAL`). Consume
             // the immediate first tick here since we just checked availability above, so
             // the poll fires on-cadence rather than instantly re-reading.
-            let mut availability_poll =
-                tokio::time::interval(PACKET_AVAILABILITY_POLL_INTERVAL);
+            let mut availability_poll = tokio::time::interval(PACKET_AVAILABILITY_POLL_INTERVAL);
             availability_poll.tick().await;
 
             // Wait for event
