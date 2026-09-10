@@ -20,9 +20,11 @@ use std::{
 use tower::{Layer, Service};
 use url::Url;
 
+pub mod chain_id;
 pub mod delegate;
 pub mod error;
 pub mod timeout;
+pub use chain_id::ChainIdLayer;
 pub use timeout::TimeoutLayer;
 
 const ETH_SEND_RAW_TRANSACTION: &str = "eth_sendRawTransaction";

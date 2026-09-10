@@ -11,7 +11,7 @@ use tracing::{info, warn};
 use url::Url;
 
 use alloy::{
-    primitives::U256,
+    primitives::{U64, U256},
     rpc::types::state::{AccountOverride, StateOverridesBuilder},
 };
 
@@ -32,7 +32,7 @@ use crate::{
         InteropService, InteropServiceHandle, TransactionService, TransactionServiceHandle,
     },
     transport::{
-        RETRY_LAYER, SequencerLayer, TimeoutLayer, create_transport,
+        ChainIdLayer, RETRY_LAYER, SequencerLayer, TimeoutLayer, create_transport,
         delegate::{EthSendRawDelegateLayer, MulticastService},
     },
     types::{AssetDescriptor, AssetUid, Assets, Erc20Slots, FeeEstimationContext, PartialIntent},
@@ -571,7 +571,19 @@ async fn try_build_provider(
 ) -> eyre::Result<DynProvider> {
     let (transport, is_local) = create_transport(endpoint).await?;
 
+    // `ChainIdLayer` answers eth_chainId from config from here on, so ask the endpoint once.
+    let remote_chain_id: U64 = ClientBuilder::default()
+        .layer(RETRY_LAYER.clone())
+        .transport(transport.clone(), is_local)
+        .request_noparams("eth_chainId")
+        .await?;
+    eyre::ensure!(
+        remote_chain_id == U64::from(chain_id),
+        "endpoint for chain {chain_id} serves chain {remote_chain_id}"
+    );
+
     let builder = ClientBuilder::default()
+        .layer(ChainIdLayer::new(chain_id))
         .layer(TraceLayer::new(chain_id))
         .layer(TimeoutLayer::new(rpc_timeout, chain_id))
         .layer(RETRY_LAYER.clone());
