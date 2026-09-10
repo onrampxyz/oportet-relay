@@ -17,7 +17,7 @@ use alloy::{
 
 use crate::{
     asset::AssetInfoServiceHandle,
-    config::{FeeConfig, RelayConfig, SimMode},
+    config::{FeeConfig, L1Fee, RelayConfig, SimMode},
     constants::DEFAULT_POLL_INTERVAL,
     error::RelayError,
     interop::SettlementError,
@@ -89,14 +89,20 @@ impl Chain {
         &self.assets
     }
 
-    /// Whether this is an OP Stack chain.
+    /// Whether this chain charges the OP Stack L1 fee, per [`FeeConfig::l1_fee`].
     pub const fn is_optimism(&self) -> bool {
-        self.chain.is_optimism()
+        match self.fees.l1_fee {
+            L1Fee::Auto => self.chain.is_optimism(),
+            l1_fee => matches!(l1_fee, L1Fee::Optimism),
+        }
     }
 
-    /// Whether this is an Arbitrum chain.
+    /// Whether this chain charges the Arbitrum L1 fee, per [`FeeConfig::l1_fee`].
     pub const fn is_arbitrum(&self) -> bool {
-        self.chain.is_arbitrum()
+        match self.fees.l1_fee {
+            L1Fee::Auto => self.chain.is_arbitrum(),
+            l1_fee => matches!(l1_fee, L1Fee::Arbitrum),
+        }
     }
 
     /// Returns access to the [`TransactionService`] via its handle.
@@ -232,6 +238,13 @@ impl Chains {
 
                 if chain_signers.is_empty() {
                     eyre::bail!("No signers configured for chain {chain}");
+                }
+
+                if desc.fees.l1_fee == L1Fee::Auto && chain.named().is_none() {
+                    warn!(
+                        "Chain {chain} is unknown to alloy-chains, so quotes include no L1 fee. \
+                         Set fees.l1_fee if it is a rollup that charges one."
+                    );
                 }
 
                 info!(

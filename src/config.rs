@@ -567,6 +567,23 @@ pub struct FeeConfig {
     /// it becomes paused. The funding amount will be [`top_up_multiplier`], times the minimum
     /// signing balance calculated by [`FeeConfig::minimum_signer_balance`].
     pub top_up_multiplier: u64,
+    /// Which L1 data fee the chain charges. `auto` infers it from the chain id.
+    pub l1_fee: L1Fee,
+}
+
+/// The L1 data fee model of a chain, used when quoting intents.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum L1Fee {
+    /// OP Stack or Arbitrum if `alloy_chains` knows the chain as one, otherwise none.
+    #[default]
+    Auto,
+    /// OP Stack: the L1 fee is paid in ETH on top of the execution fee.
+    Optimism,
+    /// Arbitrum Nitro: the L1 fee is paid as extra gas, so it must fit in the gas limit.
+    Arbitrum,
+    /// No L1 fee.
+    None,
 }
 
 impl FeeConfig {
@@ -645,6 +662,7 @@ impl Default for FeeConfig {
             minimum_fee: None,
             signer_balance_config: SignerBalanceConfig::Gas(MIN_SIGNER_GAS),
             top_up_multiplier: TOP_UP_MULTIPLIER,
+            l1_fee: L1Fee::Auto,
         }
     }
 }
@@ -1211,10 +1229,14 @@ assets:
 sim_mode: trace
 fees:
     minimum_fee: 100
+    l1_fee: arbitrum
         "#;
 
         let config = serde_yaml::from_str::<ChainConfig>(s).unwrap();
-        assert_eq!(config.fees, FeeConfig { minimum_fee: Some(100), ..Default::default() });
+        assert_eq!(
+            config.fees,
+            FeeConfig { minimum_fee: Some(100), l1_fee: L1Fee::Arbitrum, ..Default::default() }
+        );
     }
 
     #[test]
