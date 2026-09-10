@@ -197,23 +197,30 @@ impl From<RelayError> for jsonrpsee::types::error::ErrorObject<'static> {
             RelayError::ReadNotAllowed { .. }
             | RelayError::QuotaNeedsAccount
             | RelayError::NoStoredPreCalls { .. }
-            | RelayError::PreCallsNotSponsored { .. } => invalid_params(err.to_string()),
+            | RelayError::PreCallsNotSponsored { .. }
+            | RelayError::UnsupportedChain(_)
+            | RelayError::UnsupportedOrchestrator(_)
+            | RelayError::UnsupportedAsset { .. } => invalid_params(err.to_string()),
             RelayError::ReadRequiresAuth => {
                 rpc_err(jsonrpsee::types::error::INVALID_REQUEST_CODE, err.to_string(), None)
             }
-            RelayError::UnsupportedChain(_)
-            | RelayError::AbiError(_)
-            | RelayError::RpcError(_)
+            // The chain node failed, after the provider's own retries. viem retries -32603 on
+            // every layer of a client's transport stack, so each client retry would fan out into
+            // more node calls, the worst case being a rate-limited node. EIP-1474's
+            // "resource unavailable" is not retried.
+            RelayError::RpcError(_) => rpc_err(RESOURCE_UNAVAILABLE_CODE, err.to_string(), None),
+            RelayError::AbiError(_)
             | RelayError::ContractError(_)
-            | RelayError::UnsupportedOrchestrator(_)
             | RelayError::Unhealthy
             | RelayError::UnhealthyReport { .. }
-            | RelayError::UnsupportedAsset { .. }
             | RelayError::InternalError(_)
             | RelayError::Settlement(_) => internal_rpc(err.to_string()),
         }
     }
 }
+
+/// EIP-1474 "resource unavailable" error code.
+const RESOURCE_UNAVAILABLE_CODE: i32 = -32002;
 
 /// Constructs an invalid params JSON‑RPC error.
 fn invalid_params(msg: impl Into<String>) -> jsonrpsee::types::error::ErrorObject<'static> {
@@ -232,4 +239,21 @@ fn rpc_err(
     data: Option<Bytes>,
 ) -> jsonrpsee::types::error::ErrorObject<'static> {
     jsonrpsee::types::error::ErrorObject::owned(code, msg.into(), data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jsonrpsee::types::error::{ErrorObject, INVALID_PARAMS_CODE};
+
+    #[test]
+    fn deterministic_and_node_errors_use_codes_viem_does_not_retry() {
+        let code = |err: RelayError| ErrorObject::from(err).code();
+
+        assert_eq!(code(RelayError::UnsupportedChain(1)), INVALID_PARAMS_CODE);
+        assert_eq!(
+            code(RelayError::RpcError(TransportErrorKind::custom_str("429 Too Many Requests"))),
+            RESOURCE_UNAVAILABLE_CODE
+        );
+    }
 }
