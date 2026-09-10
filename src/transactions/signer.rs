@@ -765,11 +765,19 @@ impl Signer {
                 (fee_estimate.max_fee_per_gas, fee_estimate.max_priority_fee_per_gas)
             };
 
+            // Estimated, not 21000: Arbitrum chains charge the L1 data fee as extra gas,
+            // so a plain transfer there needs more than the intrinsic 21000.
+            let gas_limit = self
+                .provider
+                .estimate_gas(TransactionRequest::default().from(self.address()).to(self.address()))
+                .await
+                .map_err(|e| (e.into(), B256::ZERO))?;
+
             let tx = TypedTransaction::Eip1559(TxEip1559 {
                 chain_id: self.chain_id,
                 nonce,
                 to: self.address().into(),
-                gas_limit: 21000,
+                gas_limit,
                 max_priority_fee_per_gas: max_tip,
                 max_fee_per_gas: max_fee,
                 ..Default::default()
