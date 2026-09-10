@@ -695,33 +695,18 @@ impl AssetDiffResponse {
 
     /// Populates historical USD prices for asset diffs and fee totals.
     ///
-    /// Uses block numbers to fetch timestamps, then queries historical prices for each
-    /// asset in the diffs at their respective chain's inclusion timestamp.
+    /// `chain_timestamps` holds each chain's inclusion block timestamp. Historical prices
+    /// are queried for each asset in the diffs at its chain's timestamp.
     pub async fn populate_historical_prices<S>(
         &mut self,
         storage: &S,
         chains: &Chains,
-        chain_block_numbers: HashMap<ChainId, alloy::primitives::BlockNumber>,
+        chain_timestamps: HashMap<ChainId, u64>,
         quotes: &[Quote],
     ) -> Result<(), StorageError>
     where
         S: StorageApi,
     {
-        let block_fetches =
-            chain_block_numbers.into_iter().filter_map(|(chain_id, block_number)| {
-                let chain = chains.get(chain_id)?;
-                let provider = chain.provider().clone();
-
-                Some(async move {
-                    let block = provider.get_block(block_number.into()).await.ok()??;
-                    // todo: is there a better way to get this timestamp?
-                    Some((chain_id, block.header.timestamp))
-                })
-            });
-
-        let chain_timestamps: HashMap<ChainId, u64> =
-            join_all(block_fetches).await.into_iter().flatten().collect();
-
         // Collect all (asset_uid, timestamp) pairs that need prices
         let mut price_queries: HashSet<HistoricalPriceKey> = HashSet::default();
 

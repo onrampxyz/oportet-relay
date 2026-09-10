@@ -58,7 +58,14 @@ use jsonrpsee::{
     server::Extensions,
 };
 use opentelemetry::trace::SpanKind;
-use std::{cmp, collections::HashMap, sync::Arc, time::SystemTime};
+use schnellru::{ByLength, LruMap};
+use std::{
+    cmp,
+    collections::HashMap,
+    hash::Hash,
+    sync::{Arc, Mutex},
+    time::SystemTime,
+};
 use tokio::try_join;
 use tracing::{Instrument, Level, debug, error, info, instrument, span, warn};
 
@@ -269,6 +276,8 @@ impl Relay {
             asset_info,
             escrow_refund_threshold,
             sponsorship,
+            confirmed_intents: Mutex::new(LruMap::new(ByLength::new(2048))),
+            block_timestamps: Mutex::new(LruMap::new(ByLength::new(4096))),
         };
         Self { inner: Arc::new(inner) }
     }
@@ -3498,7 +3507,7 @@ impl RelayApiServer for Relay {
                         .populate_historical_prices(
                             &self.inner.storage,
                             &self.inner.chains,
-                            chain_block_numbers,
+                            self.block_timestamps(chain_block_numbers).await,
                             &quotes,
                         )
                         .await?;
@@ -3578,7 +3587,11 @@ impl RelayApiServer for Relay {
                             .populate_historical_prices(
                                 &self.inner.storage,
                                 &self.inner.chains,
-                                HashMap::from_iter([(chain_id, block_number)]),
+                                self.block_timestamps(HashMap::from_iter([(
+                                    chain_id,
+                                    block_number,
+                                )]))
+                                .await,
                                 &quotes,
                             )
                             .await?;
@@ -3972,6 +3985,37 @@ pub(super) struct RelayInner {
     escrow_refund_threshold: u64,
     /// Gas-sponsorship policy evaluator.
     sponsorship: SponsorshipEvaluator,
+    /// Intents decoded from confirmed transactions, keyed by chain and transaction hash.
+    ///
+    /// `wallet_getCallsHistory` is polled, and without this every poll refetches every
+    /// confirmed transaction on the page. A transaction hash pins its input, so entries
+    /// never go stale.
+    // ponytail: whole intents are cached, a few MB at capacity; cache only the payer, token
+    // and amount that `remove_fee` reads if memory ever matters.
+    confirmed_intents: Mutex<LruMap<(ChainId, B256), Intent>>,
+    /// Block timestamps used to look up historical prices, keyed by chain and block number.
+    block_timestamps: Mutex<LruMap<(ChainId, BlockNumber), u64>>,
+}
+
+/// Returns the value cached under `key`, or awaits `fetch` and caches it when it is `Some`.
+///
+/// The lock is only held to read or write the map, never across `fetch`.
+async fn read_through<K, V>(
+    cache: &Mutex<LruMap<K, V>>,
+    key: K,
+    fetch: impl Future<Output = Option<V>>,
+) -> Option<V>
+where
+    K: Hash + PartialEq,
+    V: Clone,
+{
+    let cached = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned();
+    if cached.is_some() {
+        return cached;
+    }
+    let value = fetch.await?;
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(key, value.clone());
+    Some(value)
 }
 
 impl Relay {
@@ -4145,9 +4189,13 @@ impl Relay {
         if let Some(status) = status
             && let Some(tx_hash) = status.tx_hash()
             && status.is_confirmed()
-            && let Ok(provider) = self.provider(chain_id)
-            && let Ok(Some(tx)) = provider.get_transaction_by_hash(tx_hash).await
-            && let Ok(decoded_intent) = Intent::decode_execute(tx.inner.input())
+            && let Some(decoded_intent) =
+                read_through(&self.inner.confirmed_intents, (chain_id, tx_hash), async {
+                    let provider = self.provider(chain_id).ok()?;
+                    let tx = provider.get_transaction_by_hash(tx_hash).await.ok()??;
+                    Intent::decode_execute(tx.inner.input()).ok()
+                })
+                .await
         {
             return Some((chain_id, decoded_intent));
         }
@@ -4160,6 +4208,25 @@ impl Relay {
         // <= v26 were not storing quotes, for any pending/inflight/failed this will need to return
         // None
         None
+    }
+
+    /// Returns the timestamp of each `(chain, block)`, skipping blocks that could not be fetched.
+    async fn block_timestamps(
+        &self,
+        blocks: HashMap<ChainId, BlockNumber>,
+    ) -> alloy::primitives::map::HashMap<ChainId, u64> {
+        join_all(blocks.into_iter().map(async |(chain_id, number)| {
+            let timestamp = read_through(&self.inner.block_timestamps, (chain_id, number), async {
+                let block = self.provider(chain_id).ok()?.get_block(number.into()).await.ok()??;
+                Some(block.header.timestamp)
+            })
+            .await?;
+            Some((chain_id, timestamp))
+        }))
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
     }
 }
 
@@ -4219,5 +4286,17 @@ mod tests {
         let balance = U256::from(123_456_789u64);
         let result = adjust_balance_for_decimals(balance, 6, 6);
         assert_eq!(result, balance);
+    }
+
+    #[tokio::test]
+    async fn read_through_caches_hits_but_not_misses() {
+        let cache = Mutex::new(LruMap::new(ByLength::new(2)));
+
+        // A miss is not cached, so the next read fetches again.
+        assert_eq!(read_through(&cache, 1u64, async { None::<u64> }).await, None);
+        assert_eq!(read_through(&cache, 1, async { Some(10) }).await, Some(10));
+
+        // Cached from here on: the fetch is never polled.
+        assert_eq!(read_through(&cache, 1, async { unreachable!() }).await, Some(10));
     }
 }
