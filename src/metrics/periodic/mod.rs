@@ -36,9 +36,12 @@ pub async fn spawn_periodic_collectors(
     storage: RelayStorage,
     chains: Arc<Chains>,
 ) -> Result<(), MetricCollectorError> {
+    // 300s: each run costs 3 RPC calls per chain (two multicalls and the funder's
+    // native balance) and only feeds the balance gauges. Signer pausing and top-up
+    // do their own reads on `balance_check_interval`, so nothing else waits on it.
     PeriodicJob::launch_task(
         BalanceCollector::new(config.funder, chains.clone()),
-        tokio::time::interval(Duration::from_secs(30)),
+        tokio::time::interval(Duration::from_secs(300)),
     );
 
     PeriodicJob::launch_task(

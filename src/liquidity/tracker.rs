@@ -49,9 +49,12 @@ impl LiquidityTracker {
         let this = Self { providers: providers.clone(), funder_address, storage: storage.clone() };
 
         // Spawn a task that periodically cleans up the pending unlocks for older blocks.
+        // Every 300s: pruning subtracts the removed unlocks from `locked_liquidity` in the
+        // same transaction and reads filter unlocks by block, so the cadence only bounds
+        // table size, at one eth_blockNumber per chain per run.
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                tokio::time::sleep(Duration::from_secs(300)).await;
 
                 let result = providers
                     .iter()
