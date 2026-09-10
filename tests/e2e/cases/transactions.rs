@@ -565,6 +565,34 @@ async fn diverged_nonce() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Another sender using the relay signer's nonces (e.g. a second relay with the same keys) must
+/// not fail the next intent, even before the periodic nonce check catches up.
+#[tokio::test(flavor = "multi_thread")]
+async fn diverged_nonce_resyncs_on_send() -> eyre::Result<()> {
+    let config = EnvironmentConfig {
+        block_time: Some(1.0),
+        transaction_service_config: TransactionServiceConfig {
+            // Keep the periodic check out of the way so only the send path can resync.
+            nonce_check_interval: Duration::from_secs(3600),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let signer = PrivateKeySigner::from_bytes(&FIRST_RELAY_SIGNER)?;
+    let env = Environment::setup_with_config(config).await.unwrap();
+    let tx_service_handle =
+        env.relay_handle.chains.get(env.chain_id()).unwrap().transactions().clone();
+
+    let nonce = env.provider().get_transaction_count(signer.address()).await.unwrap();
+    env.provider().anvil_set_nonce(signer.address(), nonce + 10).await.unwrap();
+
+    let account = MockAccount::new(&env).await?;
+    let tx = account.prepare_tx(&env).await;
+    assert_confirmed(tx_service_handle.send_transaction(tx).await?).await;
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn restart_with_pending() -> eyre::Result<()> {
     let mut config = EnvironmentConfig {

@@ -434,18 +434,18 @@ impl Signer {
     /// Broadcasts a given transaction.
     #[instrument(skip_all, fields(signer = %self.address(), chain_id = %self.chain_id))]
     async fn send_transaction(&self, tx: &TxEnvelope) -> Result<(), SignerError> {
-        let _ = self
-            .provider
-            .send_raw_transaction(&tx.encoded_2718())
-            .await
-            .inspect(|_| {
-                trace!(
-                    tx_hash = %tx.hash(),
-                    nonce = %tx.nonce(),
-                    "Sent transaction"
-                );
-            })
-            .inspect_err(|err| {
+        match self.provider.send_raw_transaction(&tx.encoded_2718()).await {
+            Ok(_) => {
+                trace!(tx_hash = %tx.hash(), nonce = %tx.nonce(), "Sent transaction");
+                Ok(())
+            }
+            // The node already holds this exact transaction, e.g. from an earlier attempt whose
+            // response was lost and retried, so it is sent.
+            Err(err) if err.is_already_known() => {
+                debug!(tx_hash = %tx.hash(), nonce = %tx.nonce(), "Transaction already known");
+                Ok(())
+            }
+            Err(err) => {
                 error!(
                     ?tx,
                     tx_hash = %tx.hash(),
@@ -453,9 +453,30 @@ impl Signer {
                     err = %err,
                     "Failed to send transaction"
                 );
-            })?;
+                Err(err.into())
+            }
+        }
+    }
 
-        Ok(())
+    /// Takes the next local nonce.
+    async fn next_nonce(&self) -> u64 {
+        let mut nonce = self.nonce.lock().await;
+        let current_nonce = *nonce;
+        *nonce += 1;
+        current_nonce
+    }
+
+    /// Moves the local nonce up to the node's pending nonce if it is behind. Never moves it down,
+    /// since transactions using the nonces in between may still be in flight.
+    async fn sync_nonce(&self) {
+        if let Ok(nonce) = self.provider.get_transaction_count(self.address()).pending().await {
+            self.metrics.nonce.absolute(nonce);
+            let mut lock = self.nonce.lock().await;
+            if nonce > *lock {
+                warn!(%nonce, signer = %self.address(), chain_id = %self.chain_id, "on-chain nonce is ahead of local");
+                *lock = nonce;
+            }
+        }
     }
 
     /// Waits for a pending transaction to be confirmed.
@@ -508,7 +529,7 @@ impl Signer {
                     //      if the tx is already known then the tx is still pooled and waiting for inclusion
                     //      if the nonce is too low, then the tx just got mined and we missed the receipt
                     // In these cases we start another iteration of fetching receipts
-                    && (!err.is_already_known() || !err.is_nonce_too_low())
+                    && !(err.is_already_known() || err.is_nonce_too_low())
                 {
                     debug!(%err, "failed to resubmit transaction");
                 }
@@ -585,36 +606,52 @@ impl Signer {
         }
 
         // Choose nonce for the transaction.
-        let nonce = {
-            let mut nonce = self.nonce.lock().await;
-            let current_nonce = *nonce;
-            *nonce += 1;
-            current_nonce
-        };
+        let mut nonce = self.next_nonce().await;
 
         let tx_id = tx.id;
 
         let try_send = async {
-            // sign transaction
-            let signed = self.sign_transaction(tx.build(nonce, fees)).await?;
+            let mut resynced = false;
+            loop {
+                // sign transaction
+                let signed = self.sign_transaction(tx.build(nonce, fees)).await?;
 
-            // write pending transaction to storage first to avoid race condition
-            let tx = PendingTransaction {
-                tx,
-                sent: vec![signed.clone()],
-                signer: self.address(),
-                sent_at: Utc::now(),
-            };
-            self.storage.replace_queued_tx_with_pending(&tx).await?;
+                // write pending transaction to storage first to avoid race condition
+                let pending = PendingTransaction {
+                    tx: tx.clone(),
+                    sent: vec![signed.clone()],
+                    signer: self.address(),
+                    sent_at: Utc::now(),
+                };
+                self.storage.replace_queued_tx_with_pending(&pending).await?;
 
-            // send transaction and update status
-            self.send_transaction(&signed).await?;
-            self.update_tx_status(tx.id(), TransactionStatus::Pending(*signed.hash())).await?;
-
-            Ok::<_, SignerError>(tx)
+                // send transaction and update status
+                match self.send_transaction(&signed).await {
+                    // Something outside this relay took the nonce, e.g. another relay with the
+                    // same keys. The node rejected the transaction, so drop it, catch up with the
+                    // node's nonce and send once more instead of failing the intent.
+                    Err(SignerError::Rpc(err))
+                        if !resynced
+                            && (err.is_nonce_too_low() || err.is_replacement_underpriced()) =>
+                    {
+                        warn!(%err, %nonce, signer = %self.address(), chain_id = %self.chain_id, "nonce already used, resyncing");
+                        self.storage.remove_pending_transaction(tx_id).await?;
+                        self.sync_nonce().await;
+                        nonce = self.next_nonce().await;
+                        resynced = true;
+                    }
+                    result => {
+                        result?;
+                        self.update_tx_status(tx_id, TransactionStatus::Pending(*signed.hash()))
+                            .await?;
+                        return Ok::<_, SignerError>(pending);
+                    }
+                }
+            }
         };
 
-        match try_send.await {
+        let result = try_send.await;
+        match result {
             Ok(tx) => self.watch_transaction(tx).await,
             Err(err) => {
                 error!(%err, tx_id = %tx_id, signer = %self.address(), chain_id = %self.chain_id, "failed to send a transaction");
@@ -932,17 +969,7 @@ impl Signer {
         maintenance.spawn(async move {
             loop {
                 tokio::time::sleep(this.config.nonce_check_interval).await;
-
-                if let Ok(nonce) =
-                    this.provider.get_transaction_count(this.address()).pending().await
-                {
-                    this.metrics.nonce.absolute(nonce);
-                    let mut lock = this.nonce.lock().await;
-                    if nonce > *lock {
-                        warn!(%nonce, signer = %this.address(), chain_id = %this.chain_id, "on-chain nonce is ahead of local");
-                        *lock = nonce;
-                    }
-                }
+                this.sync_nonce().await;
             }
         });
 

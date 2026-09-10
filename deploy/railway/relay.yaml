@@ -145,7 +145,11 @@ transactions:
   # top-up - both now up to 5 min. Free at our volume; revisit if signers start
   # actually draining.
   balance_check_interval: 300
-  nonce_check_interval: 60
+  # 300s, not 60s: one eth_getTransactionCount per signer per chain per tick.
+  # The send path now resyncs by itself when a nonce is already taken (e.g. by
+  # staging, which signs with the same keys) and resends the intent, so this
+  # loop is only a backstop.
+  nonce_check_interval: 300
   transaction_timeout: 60
   public_node_endpoints: {}
 
