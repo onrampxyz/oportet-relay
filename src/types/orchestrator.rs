@@ -283,12 +283,9 @@ impl<P: Provider> Orchestrator<P> {
             return Ok(AssetDeficits::default());
         }
 
-        let mut balances = self
-            .orchestrator
-            .provider()
-            .multicall()
-            .block(result.block_number.into())
-            .dynamic::<balanceOfCall>();
+        // Latest block, not `result.block_number`: that is Multicall3's `block.number`, which
+        // on Arbitrum chains is the parent chain's height and names an old L2 block.
+        let mut balances = self.orchestrator.provider().multicall().dynamic::<balanceOfCall>();
 
         for asset in result.asset_deficits.keys() {
             balances = balances.add_dynamic(

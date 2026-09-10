@@ -489,7 +489,8 @@ pub struct SimulationExecutionResult {
     pub logs: Vec<Log>,
     /// The transaction request that was simulated
     pub tx_request: TransactionRequest,
-    /// Block number the simulation was executed against
+    /// `block.number` as seen by Multicall3 during the simulation. On Arbitrum chains this is
+    /// the parent chain's block number, so do not use it to address a block on this chain.
     pub block_number: u64,
     /// Required funds for the intent to succeed.
     ///
