@@ -639,14 +639,19 @@ impl Signer {
                         self.sync_nonce().await;
                         nonce = self.next_nonce().await;
                         resynced = true;
+                        continue;
                     }
-                    result => {
-                        result?;
-                        self.update_tx_status(tx_id, TransactionStatus::Pending(*signed.hash()))
-                            .await?;
-                        return Ok::<_, SignerError>(pending);
+                    // The node never answered (a timeout, a dropped connection, a gateway error),
+                    // so the transaction may be in its pool. Failing the intent here could report
+                    // a failure for a transaction that lands. Watch it like a sent one instead:
+                    // the watcher resends it, and fills the nonce if it never lands.
+                    Err(SignerError::Rpc(err)) if err.as_error_resp().is_none() => {
+                        warn!(%err, tx_hash = %signed.hash(), signer = %self.address(), chain_id = %self.chain_id, "no answer to the send, watching the transaction");
                     }
+                    result => result?,
                 }
+                self.update_tx_status(tx_id, TransactionStatus::Pending(*signed.hash())).await?;
+                return Ok::<_, SignerError>(pending);
             }
         };
 
