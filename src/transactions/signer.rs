@@ -831,63 +831,26 @@ impl Signer {
             }
         }
 
-        if let Some(included_at_block) = receipt.block_number
-            && let Some(block) =
-                self.provider.get_block(included_at_block.into()).await.ok().flatten()
-        {
-            let submitted_at = tx.sent_at.timestamp() as u64;
-            let included_at = block.header.timestamp;
-
-            let submitted_at_block = async {
-                let block_time = self.block_time.as_millis();
-
-                // Firsly try guessing the block based on block time.
-                let first_guess = if block_time == 0 {
-                    included_at_block
-                } else {
-                    included_at_block.saturating_sub(
-                        ((included_at.saturating_sub(submitted_at)) as u128 * 1000 / block_time)
-                            as u64,
-                    )
-                };
-
-                // Follow the chain until we find a block after the submission time.
-                let mut block = self.provider.get_block(first_guess.into()).await.ok().flatten()?;
-                while block.header.timestamp <= submitted_at {
-                    block = self
-                        .provider
-                        .get_block((block.header.number + 1).into())
-                        .await
-                        .ok()
-                        .flatten()?;
-                }
-
-                // Go back until there are earlier blocks mined after the submission time.
-                let mut prev_block = self
+        // The inclusion time comes from the receipt's logs when the node sets `blockTimestamp`, so
+        // this metric costs one block fetch at most.
+        let included_at = match receipt.inner.logs().iter().find_map(|log| log.block_timestamp) {
+            Some(timestamp) => Some(timestamp),
+            None => match receipt.block_number {
+                Some(number) => self
                     .provider
-                    .get_block((block.header.number - 1).into())
+                    .get_block(number.into())
                     .await
                     .ok()
-                    .flatten()?;
-                while prev_block.header.timestamp > submitted_at {
-                    block = prev_block;
-                    prev_block = self
-                        .provider
-                        .get_block((block.header.number - 1).into())
-                        .await
-                        .ok()
-                        .flatten()?;
-                }
-
-                Some(block.header.number)
-            }
-            .await;
-
-            if let Some(submitted_at_block) = submitted_at_block {
-                self.metrics
-                    .blocks_until_inclusion
-                    .record((included_at_block.saturating_sub(submitted_at_block + 1)) as f64);
-            }
+                    .flatten()
+                    .map(|block| block.header.timestamp),
+                None => None,
+            },
+        };
+        if let Some(included_at) = included_at
+            && let Some(blocks) =
+                blocks_until_inclusion(tx.sent_at.timestamp() as u64, included_at, self.block_time)
+        {
+            self.metrics.blocks_until_inclusion.record(blocks as f64);
         }
 
         self.metrics.successful_intents.increment(1);
@@ -1306,5 +1269,39 @@ impl Future for SignerTask {
         signer.metrics.poll_duration.record(instant.elapsed().as_nanos() as f64);
 
         Poll::Pending
+    }
+}
+
+/// Value recorded in `blocks_until_inclusion` for a transaction sent at `submitted_at` and
+/// included in a block stamped `included_at` (unix seconds), estimated from the block time.
+fn blocks_until_inclusion(
+    submitted_at: u64,
+    included_at: u64,
+    block_time: Duration,
+) -> Option<u64> {
+    let block_time = block_time.as_millis();
+    if block_time == 0 {
+        return None;
+    }
+    // Position of the inclusion block counted from the first block mined after submission (1 =
+    // that block). Recording `position - 2` matches what the block walk this replaced recorded, so
+    // the histogram stays comparable.
+    let position = (included_at.saturating_sub(submitted_at) as u128 * 1000).div_ceil(block_time);
+    Some(position.saturating_sub(2) as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blocks_until_inclusion_matches_block_walk() {
+        let two_secs = Duration::from_secs(2);
+        // Sent at 10 or 11; blocks at 12, 14, 16.
+        assert_eq!(blocks_until_inclusion(10, 12, two_secs), Some(0));
+        assert_eq!(blocks_until_inclusion(11, 12, two_secs), Some(0));
+        assert_eq!(blocks_until_inclusion(10, 14, two_secs), Some(0));
+        assert_eq!(blocks_until_inclusion(10, 16, two_secs), Some(1));
+        assert_eq!(blocks_until_inclusion(10, 12, Duration::ZERO), None);
     }
 }
