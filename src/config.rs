@@ -1047,9 +1047,8 @@ mod tests {
             assert!(!cfg.whitelisted_contracts.is_empty(), "chain {id} has no whitelist");
             assert_eq!(cfg.quota_key, crate::types::QuotaKey::User);
         }
-        for id in [84532u64, 11155931] {
-            assert!(config.sponsorship.resolve(id, &config.chain_sponsorship).sponsor_all);
-        }
+        // Base Sepolia (84532) is paused in the yaml; Rise testnet stays open.
+        assert!(config.sponsorship.resolve(11155931, &config.chain_sponsorship).sponsor_all);
         assert!(config.auth.is_some());
         // Without this remap POL has no USD price and Polygon lists no fee token
         // but its native one (seen live on 2026-09-05).

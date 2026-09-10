@@ -55,7 +55,8 @@ quote:
 # testnets keep sponsor_all through their overrides.
 sponsorship:
   sponsor_all: false
-  sponsored_chains: [8453, 137, 4153, 84532, 11155931]
+  # 84532 (Base Sepolia) is paused, see its commented block under `chains`.
+  sponsored_chains: [8453, 137, 4153, 11155931]
   quota_key: user
   verified_skips_target_guard: true
   window_hours: 24
@@ -105,8 +106,9 @@ chain_sponsorship:
       - "0x11541dc387b9C307043ea732127DF92b80bab52b" # FeeManager
       - "0x000000000022D473030F116dDEE9F6B43aC78BA3" # Permit2
   # Testnets stay open: the faucet, the e2e fork and the dev loop rely on it.
-  84532:
-    sponsor_all: true
+  # 84532 is paused, see its commented block under `chains`.
+  # 84532:
+  #   sponsor_all: true
   11155931:
     sponsor_all: true
 
@@ -148,15 +150,20 @@ transactions:
   public_node_endpoints: {}
 
 chains:
-  84532:
-    endpoint: "https://sepolia.base.org"
-    sim_mode: trace
-    assets:
-      ethereum:
-        address: "0x0000000000000000000000000000000000000000"
-        fee_token: true
-    signers:
-      num_signers: 3
+  # Base Sepolia, PAUSED 2026-09-10 to cut idle RPC spend: staging points it at a
+  # paid QuickNode endpoint, and every configured chain pays the signer and
+  # metrics pollers whether or not anyone uses it. Rise testnet stays up. To
+  # restore, uncomment this block, the 84532 entry under chain_sponsorship, and
+  # add 84532 back to sponsorship.sponsored_chains.
+  # 84532:
+  #   endpoint: "https://sepolia.base.org"
+  #   sim_mode: trace
+  #   assets:
+  #     ethereum:
+  #       address: "0x0000000000000000000000000000000000000000"
+  #       fee_token: true
+  #   signers:
+  #     num_signers: 3
   # Rise testnet. Our uniform contract set is deployed here too (CREATE2 -> same
   # top-level addresses as Base Sepolia). Public RPC, no secret in the image.
   11155931:
