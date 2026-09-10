@@ -458,6 +458,48 @@ impl Signer {
         }
     }
 
+    /// Sends `tx` with `eth_sendRawTransactionSync` and returns its receipt, or `None` if the node
+    /// did not return one within [`Self::watch_window`], in which case the caller watches for it.
+    async fn send_transaction_sync(
+        &self,
+        tx: &TxEnvelope,
+    ) -> Result<Option<TransactionReceipt>, SignerError> {
+        let request = self.provider.client().request::<_, TransactionReceipt>(
+            "eth_sendRawTransactionSync",
+            (Bytes::from(tx.encoded_2718()),),
+        );
+        match tokio::time::timeout(self.watch_window(), request).await {
+            Ok(Ok(receipt)) => {
+                trace!(tx_hash = %tx.hash(), nonce = %tx.nonce(), "Sent transaction, got receipt");
+                Ok(Some(receipt))
+            }
+            // Pooled but not included in time (EIP-7966 answers with code 4), or already pooled.
+            Ok(Err(err))
+                if err.is_already_known() || err.as_error_resp().is_some_and(|e| e.code == 4) =>
+            {
+                debug!(tx_hash = %tx.hash(), nonce = %tx.nonce(), %err, "No receipt from sync send");
+                Ok(None)
+            }
+            Ok(Err(err)) => {
+                error!(
+                    ?tx,
+                    tx_hash = %tx.hash(),
+                    nonce = %tx.nonce(),
+                    err = %err,
+                    "Failed to send transaction"
+                );
+                Err(err.into())
+            }
+            // No answer in time. The transaction may be pooled, so it is watched like a sent one.
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// How long one watch for a sent transaction lasts before it is resent or replaced.
+    fn watch_window(&self) -> Duration {
+        (self.block_time * 2).max(self.config.min_watch_window)
+    }
+
     /// Takes the next local nonce.
     async fn next_nonce(&self) -> u64 {
         let mut nonce = self.nonce.lock().await;
@@ -498,7 +540,7 @@ impl Signer {
 
             let mut handles = FuturesUnordered::new();
             for sent in &tx.sent {
-                handles.push(self.monitor.watch_transaction(*sent.tx_hash(), self.block_time * 2));
+                handles.push(self.monitor.watch_transaction(*sent.tx_hash(), self.watch_window()));
             }
 
             while let Some(receipt_opt) = handles.next().await {
@@ -626,7 +668,12 @@ impl Signer {
                 self.storage.replace_queued_tx_with_pending(&pending).await?;
 
                 // send transaction and update status
-                match self.send_transaction(&signed).await {
+                let sent = if self.config.send_raw_transaction_sync {
+                    self.send_transaction_sync(&signed).await
+                } else {
+                    self.send_transaction(&signed).await.map(|()| None)
+                };
+                let receipt = match sent {
                     // Something outside this relay took the nonce, e.g. another relay with the
                     // same keys. The node rejected the transaction, so drop it, catch up with the
                     // node's nonce and send once more instead of failing the intent.
@@ -647,17 +694,24 @@ impl Signer {
                     // the watcher resends it, and fills the nonce if it never lands.
                     Err(SignerError::Rpc(err)) if err.as_error_resp().is_none() => {
                         warn!(%err, tx_hash = %signed.hash(), signer = %self.address(), chain_id = %self.chain_id, "no answer to the send, watching the transaction");
+                        None
                     }
                     result => result?,
-                }
+                };
                 self.update_tx_status(tx_id, TransactionStatus::Pending(*signed.hash())).await?;
-                return Ok::<_, SignerError>(pending);
+                return Ok::<_, SignerError>((pending, receipt));
             }
         };
 
         let result = try_send.await;
         match result {
-            Ok(tx) => self.watch_transaction(tx).await,
+            Ok((tx, Some(receipt))) => {
+                // `on_confirmed_transaction` expects the transaction to be counted as pending.
+                self.metrics.pending.increment(1);
+                self.on_confirmed_transaction(tx, receipt).await?;
+                Ok(())
+            }
+            Ok((tx, None)) => self.watch_transaction(tx).await,
             Err(err) => {
                 error!(%err, tx_id = %tx_id, signer = %self.address(), chain_id = %self.chain_id, "failed to send a transaction");
 
@@ -1142,7 +1196,7 @@ impl Signer {
     async fn wait_for_receipt(&self, tx_hash: B256) -> Option<TransactionReceipt> {
         let started = Instant::now();
         // A zero block time (instant mining) would make each watch return at once.
-        let watch = (self.block_time * 2).max(Duration::from_secs(1));
+        let watch = self.watch_window().max(Duration::from_secs(1));
         while started.elapsed() < self.config.transaction_timeout {
             if let Some(receipt) = self.monitor.watch_transaction(tx_hash, watch).await {
                 return Some(receipt);

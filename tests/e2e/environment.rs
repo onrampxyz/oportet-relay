@@ -709,6 +709,10 @@ impl Environment {
                                 signers: SignerConfig { num_signers: config.num_signers },
                                 settler_address: Some(settler_addresses[idx]),
                                 rpc_timeout_secs: 20,
+                                send_raw_transaction_sync: config
+                                    .transaction_service_config
+                                    .send_raw_transaction_sync,
+                                min_watch_window_ms: None,
                             },
                         )
                     },

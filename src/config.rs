@@ -497,6 +497,16 @@ pub struct ChainConfig {
     /// Defaults to 10 seconds if not specified.
     #[serde(default = "default_rpc_timeout_secs")]
     pub rpc_timeout_secs: u64,
+    /// Send transactions with `eth_sendRawTransactionSync` (EIP-7966) and take the receipt from
+    /// its answer instead of polling blocks for it. Only for endpoints that support the method.
+    /// `sequencer` and `eth_send_raw_delegates` only forward `eth_sendRawTransaction`, so they do
+    /// not apply to these sends.
+    #[serde(default)]
+    pub send_raw_transaction_sync: bool,
+    /// Minimum time, in milliseconds, to watch a sent transaction before resending or replacing
+    /// it. The default of two block times is very short on chains with sub-second blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_watch_window_ms: Option<u64>,
 }
 
 /// Chain specific config for signers.
@@ -1007,6 +1017,12 @@ pub struct TransactionServiceConfig {
     /// for querying transactions.
     #[serde(with = "crate::serde::hash_map")]
     pub public_node_endpoints: HashMap<Chain, Url>,
+    /// Set per chain from [`ChainConfig::send_raw_transaction_sync`].
+    #[serde(skip)]
+    pub send_raw_transaction_sync: bool,
+    /// Set per chain from [`ChainConfig::min_watch_window_ms`].
+    #[serde(skip)]
+    pub min_watch_window: Duration,
 }
 
 impl Default for TransactionServiceConfig {
@@ -1019,6 +1035,8 @@ impl Default for TransactionServiceConfig {
             transaction_timeout: Duration::from_secs(60),
             max_queued_per_eoa: 1,
             public_node_endpoints: HashMap::default(),
+            send_raw_transaction_sync: false,
+            min_watch_window: Duration::ZERO,
         }
     }
 }
@@ -1205,6 +1223,8 @@ sim_mode: trace
             signers: Default::default(),
             settler_address: None,
             rpc_timeout_secs: default_rpc_timeout_secs(),
+            send_raw_transaction_sync: false,
+            min_watch_window_ms: None,
         };
 
         assert_eq!(config, expected);

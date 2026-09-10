@@ -775,3 +775,26 @@ async fn test_signer_pull_gas_slow_inclusion() -> eyre::Result<()> {
 
     Ok(())
 }
+
+/// A chain configured with `send_raw_transaction_sync` confirms intents from the receipt the send
+/// returns.
+#[tokio::test(flavor = "multi_thread")]
+async fn send_raw_transaction_sync() -> eyre::Result<()> {
+    let env = Environment::setup_with_config(EnvironmentConfig {
+        block_time: Some(1.0),
+        transaction_service_config: TransactionServiceConfig {
+            send_raw_transaction_sync: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await?;
+    let tx_service_handle =
+        env.relay_handle.chains.get(env.chain_id()).unwrap().transactions().clone();
+
+    let account = MockAccount::new(&env).await?;
+    let tx = account.prepare_tx(&env).await;
+    assert_confirmed(tx_service_handle.send_transaction(tx).await?).await;
+
+    Ok(())
+}

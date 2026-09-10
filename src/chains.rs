@@ -17,7 +17,7 @@ use alloy::{
 
 use crate::{
     asset::AssetInfoServiceHandle,
-    config::{FeeConfig, L1Fee, RelayConfig, SimMode},
+    config::{FeeConfig, L1Fee, RelayConfig, SimMode, TransactionServiceConfig},
     constants::DEFAULT_POLL_INTERVAL,
     error::RelayError,
     interop::SettlementError,
@@ -267,7 +267,13 @@ impl Chains {
                     desc.flashblocks.as_ref(),
                     chain_signers.clone(),
                     storage.clone(),
-                    config.transactions.clone(),
+                    TransactionServiceConfig {
+                        send_raw_transaction_sync: desc.send_raw_transaction_sync,
+                        min_watch_window: Duration::from_millis(
+                            desc.min_watch_window_ms.unwrap_or_default(),
+                        ),
+                        ..config.transactions.clone()
+                    },
                     config.funder,
                     desc.fees.clone(),
                     asset_info.clone(),
