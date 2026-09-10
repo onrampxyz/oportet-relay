@@ -245,9 +245,13 @@ chains:
       num_signers: 3
   # --- Planned mainnets, COMMENTED OUT until the uniform contract set is
   # deployed on them (same CREATE2 addresses as the top of this file). To enable
-  # one: deploy, fund the funder and the signers on that chain, set RPC_<chainId>
-  # on the Railway service to the QuickNode multichain URL (Infisical /relay,
-  # prod) the way RPC_8453 gets RPC_URL_BASE, then uncomment its block. Neither
+  # one: deploy, register the signers as gas wallets in SimpleFunder
+  # (setGasWallet), fund the funder and the signers on that chain, set
+  # RPC_<chainId> on the Railway service to the QuickNode multichain URL
+  # (Infisical /relay, prod) the way RPC_8453 gets RPC_URL_BASE, then uncomment
+  # its block. Boot diagnostics refuse to start the relay if a signer is not a
+  # gas wallet, the funder holds no native token, or a contract's EIP-712
+  # domain does not match, and they read all of it through Multicall3. Neither
   # is in sponsorship.sponsored_chains, so users pay their own fees in the fee
   # tokens below until a chain_sponsorship entry is sized for the chain.
   # Token addresses, symbols and decimals were read on-chain on 2026-09-10, and
