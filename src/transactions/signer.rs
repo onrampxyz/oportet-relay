@@ -1053,12 +1053,7 @@ impl Signer {
             lock_amount: funding_amount,
         };
 
-        let nonce = {
-            let mut nonce = self.nonce.lock().await;
-            let current_nonce = *nonce;
-            *nonce += 1;
-            current_nonce
-        };
+        let nonce = self.next_nonce().await;
 
         let tx = TxEip1559 {
             chain_id: self.chain_id,
@@ -1103,7 +1098,7 @@ impl Signer {
             None => {
                 if self.provider.get_transaction_by_hash(tx_hash).await?.is_some() {
                     info!(?tx_hash, signer = %self.address(), chain_id = %self.chain_id, "pull gas transaction found in pool, waiting for confirmation");
-                    self.monitor.watch_transaction(tx_hash, self.block_time * 2).await
+                    self.wait_for_receipt(tx_hash).await
                 } else {
                     info!(?tx_hash, signer = %self.address(), chain_id = %self.chain_id, "pull gas transaction not found, attempting to send");
                     self.broadcast_and_monitor_pull_gas(&tx).await.ok()
@@ -1124,17 +1119,36 @@ impl Signer {
     ) -> Result<TransactionReceipt, SignerError> {
         self.send_transaction(signed_tx).await?;
 
-        let receipt = self
-            .monitor
-            .watch_transaction(*signed_tx.tx_hash(), self.block_time * 2)
-            .await
-            .ok_or(SignerError::TxTimeout)?;
+        let receipt =
+            self.wait_for_receipt(*signed_tx.tx_hash()).await.ok_or(SignerError::TxTimeout)?;
 
         if receipt.status() {
             Ok(receipt)
         } else {
             Err(SignerError::Other("pullGas reverted".into()))
         }
+    }
+
+    /// Waits for `tx_hash` to be mined, for as long as an intent transaction would be given
+    /// ([`TransactionServiceConfig::transaction_timeout`]).
+    ///
+    /// A single watch only covers two block times, so this keeps watching, and asks the node for
+    /// the receipt once more at the end in case the watcher missed the inclusion.
+    async fn wait_for_receipt(&self, tx_hash: B256) -> Option<TransactionReceipt> {
+        let started = Instant::now();
+        // A zero block time (instant mining) would make each watch return at once.
+        let watch = (self.block_time * 2).max(Duration::from_secs(1));
+        while started.elapsed() < self.config.transaction_timeout {
+            if let Some(receipt) = self.monitor.watch_transaction(tx_hash, watch).await {
+                return Some(receipt);
+            }
+        }
+        self.provider
+            .get_transaction_receipt(tx_hash)
+            .await
+            .ok()
+            .flatten()
+            .filter(|receipt| receipt.block_number.is_some())
     }
 
     /// Updates the pull gas transaction state in storage and unlocks liquidity.

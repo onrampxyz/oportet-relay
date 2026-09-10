@@ -723,3 +723,55 @@ async fn test_signer_pull_gas() -> eyre::Result<()> {
 
     Ok(())
 }
+
+/// A pull gas transaction that takes longer than the signer's short confirmation watch to land
+/// must not be written off as failed while it is still pending.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_signer_pull_gas_slow_inclusion() -> eyre::Result<()> {
+    let env = Environment::setup_with_config(EnvironmentConfig {
+        block_time: Some(0.5),
+        transaction_service_config: TransactionServiceConfig {
+            balance_check_interval: Duration::from_millis(100),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await?;
+
+    let provider = env.providers[0].clone();
+    let mnemonic = Mnemonic::<English>::new_from_phrase(SIGNERS_MNEMONIC)?;
+    let signer_address = DynSigner::derive_from_mnemonic(mnemonic, 1)?[0].address();
+    let storage = env.relay_handle.storage.clone();
+    let pending_pull_gas =
+        async || storage.load_pending_pull_gas_transactions(signer_address, env.chain_id()).await;
+
+    // Hold blocks back so the pull gas transaction sits in the pool.
+    env.disable_mining().await;
+    let fees = provider.estimate_eip1559_fees().await?;
+    let min_balance = MIN_SIGNER_GAS * U256::from(fees.max_fee_per_gas);
+    provider.anvil_set_balance(signer_address, min_balance.div_ceil(U256::from(2))).await?;
+
+    let mut waited = Duration::ZERO;
+    while pending_pull_gas().await?.is_empty() {
+        assert!(waited < Duration::from_secs(5), "pull gas was never sent");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        waited += Duration::from_millis(100);
+    }
+
+    // Several block times later the transaction is still pending, not written off.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(pending_pull_gas().await?.len(), 1);
+
+    env.enable_mining().await;
+    provider.anvil_mine(Some(1), None).await?;
+
+    let mut waited = Duration::ZERO;
+    while !pending_pull_gas().await?.is_empty() {
+        assert!(waited < Duration::from_secs(5), "pull gas never completed");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        waited += Duration::from_millis(100);
+    }
+    assert!(provider.get_balance(signer_address).await? > min_balance);
+
+    Ok(())
+}
