@@ -4,7 +4,7 @@ use crate::{
     auth::{DevBypass, JwksCache, JwtAuthLayer},
     chains::Chains,
     cli::Args,
-    config::RelayConfig,
+    config::{RelayConfig, WellKnownConfig},
     constants::{DEFAULT_PORTO_BASE_URL, ESCROW_REFUND_DURATION_SECS},
     diagnostics::run_diagnostics,
     metrics::{self, HttpTracingService, RpcMetricsService},
@@ -21,9 +21,13 @@ use alloy::{primitives::B256, signers::local::LocalSigner};
 use eyre::WrapErr;
 use http::header;
 use itertools::Itertools;
-use jsonrpsee::server::{
-    Server, ServerConfig, ServerHandle,
-    middleware::{http::ProxyGetRequestLayer, rpc::RpcServiceBuilder},
+use jsonrpsee::{
+    RpcModule,
+    server::{
+        Server, ServerConfig, ServerHandle,
+        middleware::{http::ProxyGetRequestLayer, rpc::RpcServiceBuilder},
+    },
+    types::ErrorObjectOwned,
 };
 use metrics_exporter_prometheus::PrometheusHandle;
 use resend_rs::Resend;
@@ -249,6 +253,7 @@ pub async fn try_spawn(config: RelayConfig, skip_diagnostics: bool) -> eyre::Res
         None
     };
     let mut rpc = relay.into_rpc();
+    let well_known_routes = register_well_known(&mut rpc, &config.well_known)?;
 
     // http layers
     let cors = CorsLayer::new()
@@ -284,11 +289,11 @@ pub async fn try_spawn(config: RelayConfig, skip_diagnostics: bool) -> eyre::Res
             ServiceBuilder::new()
                 .layer(cors)
                 .layer(jwt_auth)
-                .layer(ProxyGetRequestLayer::new([
-                    ("/health", "health"),
-                    ("/live", "live"),
-                    ("/ready", "ready"),
-                ])?)
+                .layer(ProxyGetRequestLayer::new(
+                    [("/health", "health"), ("/live", "live"), ("/ready", "ready")]
+                        .into_iter()
+                        .chain(well_known_routes),
+                )?)
                 .layer_fn(HttpTracingService::new),
         )
         .set_rpc_middleware(RpcServiceBuilder::new().layer_fn(RpcMetricsService::new))
@@ -369,11 +374,74 @@ fn check_dev_hatch_capped(
     }
 }
 
+/// Registers each configured `/.well-known/` document as a bare RPC method and
+/// returns the `(path, method)` pairs that let the GET proxy serve it, the same
+/// way `/health` is served. The proxy answers with the method's result as the
+/// body, typed `application/json`, which is what iOS and Android fetch.
+fn register_well_known<C: Send + Sync + 'static>(
+    rpc: &mut RpcModule<C>,
+    config: &WellKnownConfig,
+) -> eyre::Result<Vec<(&'static str, &'static str)>> {
+    let mut routes = Vec::new();
+    for (path, method, doc) in [
+        (
+            "/.well-known/apple-app-site-association",
+            "wellKnown_appleAppSiteAssociation",
+            &config.apple_app_site_association,
+        ),
+        ("/.well-known/assetlinks.json", "wellKnown_assetlinks", &config.assetlinks),
+    ] {
+        let Some(doc) = doc.clone() else { continue };
+        rpc.register_method(method, move |_, _, _| Ok::<_, ErrorObjectOwned>(doc.clone()))?;
+        routes.push((path, method));
+    }
+    Ok(routes)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{assert_dev_hatch_safe, check_dev_hatch_capped};
-    use crate::config::{AuthConfig, RelayConfig};
+    use super::{assert_dev_hatch_safe, check_dev_hatch_capped, register_well_known};
+    use crate::config::{AuthConfig, RelayConfig, WellKnownConfig};
+    use jsonrpsee::{
+        RpcModule,
+        server::{Server, middleware::http::ProxyGetRequestLayer},
+    };
     use std::collections::HashMap;
+    use tower::ServiceBuilder;
+
+    #[tokio::test]
+    async fn well_known_documents_are_served_on_get() {
+        let config: WellKnownConfig = serde_yaml::from_str(
+            "apple_app_site_association:\n  webcredentials:\n    apps: [\"TEAM.com.example.app\"]\n",
+        )
+        .unwrap();
+        let mut rpc = RpcModule::new(());
+        let routes = register_well_known(&mut rpc, &config).unwrap();
+        let server = Server::builder()
+            .set_http_middleware(
+                ServiceBuilder::new().layer(ProxyGetRequestLayer::new(routes).unwrap()),
+            )
+            .build("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = server.start(rpc);
+
+        let res = reqwest::get(format!("http://{addr}/.well-known/apple-app-site-association"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let content_type = res.headers()[http::header::CONTENT_TYPE].to_str().unwrap().to_owned();
+        assert!(content_type.starts_with("application/json"), "{content_type}");
+        let body: serde_json::Value = serde_json::from_str(&res.text().await.unwrap()).unwrap();
+        assert_eq!(Some(body), config.apple_app_site_association);
+
+        // A document left out of the config gets no route.
+        let res = reqwest::get(format!("http://{addr}/.well-known/assetlinks.json")).await.unwrap();
+        assert_eq!(res.status(), 405);
+
+        handle.stop().unwrap();
+    }
 
     #[test]
     fn dev_hatch_ok_when_subject_has_positive_override() {

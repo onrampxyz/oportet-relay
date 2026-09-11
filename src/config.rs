@@ -111,6 +111,23 @@ pub struct RelayConfig {
     /// quota can be keyed by user id. Absent = address-mode quota only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<AuthConfig>,
+    /// Passkey association files served under `/.well-known/`, so the relay's
+    /// host can be the WebAuthn relying party of a native app.
+    #[serde(default)]
+    pub well_known: WellKnownConfig,
+}
+
+/// Documents the relay serves verbatim at `/.well-known/<file>`. They stay raw
+/// JSON because Apple and Google own their schemas and the relay never reads
+/// them. An absent document is not routed.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct WellKnownConfig {
+    /// `/.well-known/apple-app-site-association` (iOS `webcredentials`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apple_app_site_association: Option<serde_json::Value>,
+    /// `/.well-known/assetlinks.json` (Android Digital Asset Links).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assetlinks: Option<serde_json::Value>,
 }
 
 /// Better Auth JWT verification config.
@@ -1092,6 +1109,10 @@ mod tests {
             config.pricefeed.coingecko.remapping.get(&AssetUid::new("pol".into())),
             Some(&"polygon-ecosystem-token".to_string())
         );
+        // A mis-indented block would parse as an unknown key and leave
+        // id.oportet.xyz without its passkey association files.
+        assert!(config.well_known.apple_app_site_association.is_some());
+        assert!(config.well_known.assetlinks.is_some());
     }
 
     #[test]
