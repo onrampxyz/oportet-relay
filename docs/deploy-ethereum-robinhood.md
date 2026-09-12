@@ -680,34 +680,83 @@ fees in the listed fee tokens until a `chain_sponsorship` entry is sized.
 
 ## Step 10 — Rehearse the relay locally
 
-The last gate before production, and the one that catches the most. Boot the
-relay on your own machine with the edited `relay.yaml` and the real mainnet RPCs.
-Diagnostics are read-only — they only read chain state through Multicall3 — so
-this is safe to run against live chains and sends nothing.
+The last gate before production and the one that catches the most, but it is not
+the harmless read-only exercise an earlier draft of this document claimed. Read
+the warning below before running it.
 
-```bash
-RPC_1=$RPC_1 RPC_4663=$RPC_4663 cargo run --bin relay -- --config deploy/railway/relay.yaml
+### The rehearsal sends real transactions
+
+The diagnostics are read-only. **The relay is not.** Nothing stops at the
+diagnostics report: the boot continues straight into the transaction service,
+which manages signers, pulls from SimpleFunder to top them up, and closes nonce
+gaps. On mainnet. With production keys.
+
+Running this on 2026-09-12 moved real money within about four minutes:
+
+```
+SimpleFunder Robinhood   0.020000 -> 0.003242    (-0.0168)
+each of three signers    0.001    -> ~0.0066     (nonce 0 -> 1)
 ```
 
-The relay refuses to start unless every check passes, so a clean boot is the pass
-condition. Between them, `src/diagnostics/chain.rs` and
-`src/diagnostics/layerzero.rs` verify:
+Nothing was lost — the funder exists to fund gas wallets and it did exactly that
+— but it was not intended, and Ethereum escaped the same treatment only because
+the process was killed first. Six `ERROR` lines about `nonce too low: tx: 0
+state: 1` were the relay's own retries racing its own first transactions.
+
+`--config-only` does not mean read-only. It controls where configuration comes
+from, nothing else.
+
+### It also collides with production
+
+Railway runs on the same `RELAY_MNEMONIC`, so a local boot drives the same three
+signer addresses as the live relay on every chain both have configured. That is
+two processes assigning nonces to one account. The 2026-09-12 run overlapped a
+live production relay for four minutes and got away with it because production
+was idle and the affected chain was one production does not carry. Do not rely on
+that twice.
+
+### How to run it safely
+
+Kill the process the moment the diagnostics report prints. Everything worth
+learning is in the report; everything after it is the relay going to work.
+
+```bash
+RUST_LOG=info ./target/release/relay --config deploy/railway/relay.yaml --config-only \
+  2>&1 | tee rehearsal.log | grep -m1 "Diagnostics completed"
+# then kill it immediately: the pipeline above does not stop the relay
+```
+
+Two details that make the run work at all. Omit `RELAY_DB_URL` and the relay
+falls back to in-memory storage (`src/spawn.rs:130`), so no database is needed
+and production's is never touched. Build first rather than using `cargo run`,
+because a stale `target/release/relay` will happily rehearse code that is months
+old.
+
+### What the report must say
+
+A clean report means every check passed; the relay refuses to start otherwise.
+Between them `src/diagnostics/chain.rs` and `src/diagnostics/layerzero.rs`
+verify:
 
 - every signer is a registered gas wallet, and the funder holds native token;
 - each contract's EIP-712 domain matches what the relay expects;
-- all five chains have LayerZero configuration, and the settler can send between
-  **every chain pair in both directions**, which is what catches a half-wired
-  mesh;
-- ULN settings and DVN config per pair: counts consistent, no zero addresses, at
-  least one DVN present;
-- a live fee quote for cross-chain messages actually generates.
+- assets resolve and their decimals match;
+- LayerZero configuration per pair, when interop is configured.
 
-Never pass `--skip-diagnostics` here. It exists for cases where a chain is known
-degraded, and using it on this run would skip the only thing standing between a
-misconfiguration and production.
+Two warnings are expected and not failures while interop is absent from
+`relay.yaml`:
 
-If it refuses, the error names the chain and the failed check. Fix and re-run
-before going near Railway.
+```
+Chain connectivity: 0 connections found: []
+No configuration for interop found, but more than one endpoint was configured
+```
+
+The on-chain mesh from step 5 exists regardless; the relay simply does not use it
+until an interop block is added. Base, Polygon and Rise have run this way since
+July.
+
+Never pass `--skip-diagnostics`. It exists for a known-degraded chain, and using
+it here skips the only thing between a misconfiguration and production.
 
 ## Step 11 — Deploy the relay and verify from outside
 
