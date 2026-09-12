@@ -294,40 +294,40 @@ chains:
   # Ethereum mainnet. An L1, so l1_fee auto resolves to none. At 12s blocks the
   # default watch window (two blocks) needs no floor, and a sync send would hold
   # a request open for a whole block, so it stays off.
-  # 1:
-  #   endpoint: "https://ethereum-rpc.publicnode.com"
-  #   sim_mode: simulatev1
-  #   assets:
-  #     ethereum:
-  #       address: "0x0000000000000000000000000000000000000000"
-  #       fee_token: true
-  #     usd-coin:
-  #       address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-  #       decimals: 6
-  #       fee_token: true
-  #   signers:
-  #     num_signers: 3
+  1:
+    endpoint: "https://ethereum-rpc.publicnode.com"
+    sim_mode: simulatev1
+    assets:
+      ethereum:
+        address: "0x0000000000000000000000000000000000000000"
+        fee_token: true
+      usd-coin:
+        address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        decimals: 6
+        fee_token: true
+    signers:
+      num_signers: 3
   # Robinhood Chain mainnet: Arbitrum Orbit, gas in ETH, 100ms blocks.
   # alloy-chains has no entry for 4663, so l1_fee must say arbitrum: auto would
   # warn at boot and quote no L1 fee. At 100ms blocks the watcher would fetch
   # about ten blocks a second per pending transaction, so sends go through
   # eth_sendRawTransactionSync and the watch window gets a 2s floor; two blocks
   # (200ms) is shorter than a normal inclusion.
-  # 4663:
-  #   endpoint: "https://rpc.mainnet.chain.robinhood.com"
-  #   sim_mode: simulatev1
-  #   send_raw_transaction_sync: true
-  #   min_watch_window_ms: 2000
-  #   fees:
-  #     l1_fee: arbitrum
-  #   assets:
-  #     ethereum:
-  #       address: "0x0000000000000000000000000000000000000000"
-  #       fee_token: true
-  #     # Paxos USDG is the chain's dollar: USDC bridged in arrives as USDG.
-  #     global-dollar:
-  #       address: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
-  #       decimals: 6
-  #       fee_token: true
-  #   signers:
-  #     num_signers: 3
+  4663:
+    endpoint: "https://rpc.mainnet.chain.robinhood.com"
+    sim_mode: simulatev1
+    send_raw_transaction_sync: true
+    min_watch_window_ms: 2000
+    fees:
+      l1_fee: arbitrum
+    assets:
+      ethereum:
+        address: "0x0000000000000000000000000000000000000000"
+        fee_token: true
+      # Paxos USDG is the chain's dollar: USDC bridged in arrives as USDG.
+      global-dollar:
+        address: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+        decimals: 6
+        fee_token: true
+    signers:
+      num_signers: 3
