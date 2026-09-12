@@ -56,7 +56,7 @@ quote:
 sponsorship:
   sponsor_all: false
   # 84532 (Base Sepolia) is paused, see its commented block under `chains`.
-  sponsored_chains: [8453, 137, 4153, 11155931]
+  sponsored_chains: [1, 137, 4153, 4663, 8453, 11155931]
   quota_key: user
   verified_skips_target_guard: true
   window_hours: 24
@@ -104,6 +104,30 @@ chain_sponsorship:
       - "0xe436820ba0C69702c1d3E601d421c0eF38262739" # USDC.e
       - "0x2C03C7d7e2974C6599b6B108879109281ef3F818" # CollateralManager
       - "0x11541dc387b9C307043ea732127DF92b80bab52b" # FeeManager
+      - "0x000000000022D473030F116dDEE9F6B43aC78BA3" # Permit2
+  # Ethereum mainnet: the only chain where gas is genuinely expensive and
+  # volatile. Both ceilings are set by what the funder holds (~0.011 ETH), not by
+  # appetite: the global 0.1 ETH breaker would never trip, the funder would just
+  # empty and every sponsored call would start failing outright. 0.005 ETH/day
+  # breaker keeps ~half the balance in reserve.
+  # At 0.05 gwei a ~300k-gas intent costs ~1.5e-5 ETH, so 0.001 ETH/user/day is
+  # dozens of intents. At 5 gwei it is one, and above ~15 gwei the per-user cap
+  # denies the first call. That is deliberate - it fails closed on a gas spike
+  # rather than draining the funder. Raise both together with the balance.
+  1:
+    per_user_wei: "1000000000000000"
+    circuit_breaker_wei: "5000000000000000"
+    whitelisted_contracts:
+      - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC (Circle)
+      - "0x000000000022D473030F116dDEE9F6B43aC78BA3" # Permit2
+  # Robinhood mainnet: Arbitrum Orbit, so the L1 data fee dominates the 0.09 gwei
+  # execution price. Funder holds ~0.008 ETH, breaker sized under it for the same
+  # reason as Ethereum.
+  4663:
+    per_user_wei: "500000000000000"
+    circuit_breaker_wei: "4000000000000000"
+    whitelisted_contracts:
+      - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" # USDG (Global Dollar)
       - "0x000000000022D473030F116dDEE9F6B43aC78BA3" # Permit2
   # Testnets stay open: the faucet, the e2e fork and the dev loop rely on it.
   # 84532 is paused, see its commented block under `chains`.
