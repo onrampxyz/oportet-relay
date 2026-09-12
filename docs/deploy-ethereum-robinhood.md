@@ -664,16 +664,46 @@ the same way `RPC_8453` gets `RPC_URL_BASE`. Without these the relay falls back
 to the public endpoints written in `relay.yaml`, which is not what you want in
 production and, for Ethereum, may not even respond.
 
+Use `--skip-deploys`. Setting a variable normally triggers a redeploy, which
+would restart the live relay on an image that does not yet have the new chain
+blocks — a pointless production restart. The variables sit unused until step 11
+ships the image that reads them.
+
+```bash
+railway variables --service relay --environment production --skip-deploys \
+  --set "RPC_1=$(iget RPC_URL_ETHEREUM)"
+railway variables --service relay --environment production --skip-deploys \
+  --set "RPC_4663=$(iget RPC_URL_ROBINHOOD)"
+```
+
+Check the names landed with `railway variables --service relay --kv`, and filter
+the output rather than reading it whole: the table prints raw values, so an
+unfiltered `--kv` puts every secret on your screen.
+
 ## Step 9 — Uncomment the chain blocks
 
 In `oportet-relay/deploy/railway/relay.yaml`, uncomment the `1:` and `4663:`
-blocks (currently around lines 294-330). They are already written with the right
-settings and should not need editing:
+blocks. They are already written with the right settings and should not need
+editing:
 
 - Ethereum: `sim_mode: simulatev1`, no L1 fee, no sync send, 3 signers.
 - Robinhood: `sim_mode: simulatev1`, `send_raw_transaction_sync: true`,
   `min_watch_window_ms: 2000`, and `l1_fee: arbitrum` set explicitly because
   alloy-chains has no entry for 4663 and `auto` would quote no L1 fee at all.
+
+Do not script this with a blanket comment-stripper. The 4663 block has a prose
+comment inside it, above `global-dollar`, and a naive pass stops there and
+silently leaves the rest of the block commented — including `signers`, whose
+absence YAML accepts without complaint. Uncomment it, then parse the file and
+assert every chain has the keys you expect:
+
+```bash
+python3 -c "
+import yaml
+d=yaml.safe_load(open('deploy/railway/relay.yaml'))
+for c,b in d['chains'].items(): print(c, b.get('signers'), list(b['assets']))
+"
+```
 
 Neither chain goes into `sponsorship.sponsored_chains` yet. Users pay their own
 fees in the listed fee tokens until a `chain_sponsorship` entry is sized.
@@ -760,23 +790,51 @@ it here skips the only thing between a misconfiguration and production.
 
 ## Step 11 — Deploy the relay and verify from outside
 
-Deploy to Railway. The same diagnostics run there, so a clean start is again the
-pass condition, and a refusal names what failed.
+```bash
+railway up --service relay --environment production --ci
+```
 
-Then confirm independently of the relay's own opinion:
+`--ci` is what makes it work unattended; without it the command wants a terminal.
+The build is a full `cargo build --profile maxperf`, so expect to wait. The same
+diagnostics run on Railway, so a clean start is again the pass condition, and a
+refusal names what failed.
 
-- `eth_getCode` at all seven addresses on both chains, compared against the same
-  call on Base. Identical code means identical contracts.
-- On each new chain, read back the send and receive configs for the four
-  destination eids and confirm each names LayerZero Labs as required and both
-  Horizen and Nethermind as optional with a threshold of 1. Diagnostics do not
-  cover this: `layerzero.rs` checks that DVN counts are consistent, that no
-  address is zero and that at least one DVN exists, but it never compares the
-  addresses against the ones chosen here. A pathway that silently fell back to
-  LayerZero's default DVNs passes every automated check and still delivers
-  messages — just with validators nobody picked.
-- A sponsored-path call on each chain, matching however Base was smoke-tested in
-  July.
+Then confirm independently of the relay's own opinion.
+
+**Ask the live relay what it serves.** The quickest end-to-end proof that the new
+config actually shipped:
+
+```bash
+curl -s -X POST https://relay.onramp.xyz \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"wallet_getCapabilities","params":[]}'
+```
+
+Every configured chain id should appear, 1 and 4663 among them.
+
+**Check the contracts, but do not expect identical bytecode.** An earlier draft
+said to compare `eth_getCode` against Base and treat identical code as proof.
+That is wrong. Orchestrator, IthacaAccount, SimpleFunder and LayerZeroSettler
+cache chain-specific EIP-712 domain separators in immutables, which the
+constructor writes after the CREATE2 address is already fixed, so those four
+differ on every chain — Base, Polygon and Rise differ from each other too. The
+other three are byte-identical everywhere. Identical bytecode on all seven would
+mean replay protection was broken. Check that code is present at all seven
+addresses, and compare hashes across the existing chains before calling any
+difference suspicious.
+
+**Check the DVNs by address.** On each new chain, read back the send and receive
+configs for the four destination eids and confirm each names LayerZero Labs as
+required and both Horizen and Nethermind as optional with a threshold of 1.
+Diagnostics do not cover this: `layerzero.rs` checks that DVN counts are
+consistent, that no address is zero and that at least one DVN exists, but it
+never compares the addresses against the ones chosen here. A pathway that
+silently fell back to LayerZero's default DVNs passes every automated check and
+still delivers messages, just with validators nobody picked.
+
+**Expect two warnings** until interop is configured in `relay.yaml`:
+`Chain connectivity: 0 connections found` and `No configuration for interop
+found`. The on-chain mesh exists regardless; the relay does not use it yet.
 
 ## If it goes wrong
 
