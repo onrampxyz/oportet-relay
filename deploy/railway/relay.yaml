@@ -164,7 +164,9 @@ well_known:
     webcredentials:
       apps: ["Q7767Q7TRJ.com.onramp.app"]
   assetlinks:
-    - relation: ["delegate_permission/common.get_login_creds"]
+    - relation:
+        - "delegate_permission/common.handle_all_urls"
+        - "delegate_permission/common.get_login_creds"
       target:
         namespace: android_app
         package_name: com.onramp.app
@@ -176,7 +178,9 @@ well_known:
           - "B5:F1:2F:27:66:D6:73:96:09:03:7B:ED:F6:9C:62:B6:02:0F:B5:B1:22:8A:39:CF:B0:0F:FD:61:97:FE:B1:FF"
           - "F5:D6:40:2C:C4:06:6D:4A:1F:63:C1:B8:39:99:AA:B4:BB:4E:97:0B:C8:90:73:76:59:92:31:40:7C:AA:17:5F"
           - "81:CA:3A:B3:86:5C:E0:4D:CC:7F:D6:C5:5D:0A:D0:90:9B:70:D7:81:42:AB:52:C1:1C:5B:26:0C:1D:4C:1F:B4"
-    - relation: ["delegate_permission/common.get_login_creds"]
+    - relation:
+        - "delegate_permission/common.handle_all_urls"
+        - "delegate_permission/common.get_login_creds"
       target:
         namespace: android_app
         package_name: com.onramp.app.debug
