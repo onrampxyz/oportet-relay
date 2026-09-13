@@ -1,14 +1,24 @@
 # Railway deploy — config-as-code home
 
-This fork does NOT diverge relay code. `main` mirrors `ithacaxyz/relay` (pin: `v26.1.4`);
-this `deploy/railway` branch carries our deploy configuration only, so upstream syncs
-never conflict with it.
+Railway builds the root `Dockerfile` from `main`: a cargo-chef build of this fork
+that bakes `deploy/railway/relay.yaml` into the image and boots
+`relay --config /app/relay.yaml --config-only`. Railway has no file mounts and
+chain/asset maps are impractical as env vars, so the config ships in the image.
+**No secrets ever in `relay.yaml`.** Secrets (`RELAY_MNEMONIC`,
+`RELAY_FUNDER_SIGNER_KEY`, `RELAY_FUNDER_OWNER_KEY`, `RELAY_DB_URL`, `GECKO_API`,
+keyed `RPC_<chainId>` URLs) live in Railway env only and are read at boot.
 
-- `Dockerfile` — wraps the stock upstream image, bakes `relay.yaml` in (Railway has no
-  file mounts; chain/asset maps are impractical as env vars).
-- `relay.yaml` — chain blocks + contract addresses (authored in Railway-plan Slices 1-2).
-  **No secrets ever.** Secrets (`RELAY_MNEMONIC`, `RELAY_FUNDER_SIGNER_KEY`, `GECKO_API`,
-  `RELAY_DB_URL`, keyed RPC URLs) live in Railway env only.
+`relay.yaml` carries chain blocks and contract addresses, the sponsorship policy,
+pricefeed remaps, the Better Auth JWKS URL, and the passkey association files
+served under `/.well-known/`. Any change to it needs an image rebuild — push to
+`main` and Railway redeploys.
+
+The fork pins upstream `ithacaxyz/relay` at `v26.1.4` (see `Cargo.toml`) but
+diverges on top of it: gas sponsorship, user-gated quota via Better Auth JWTs,
+the `/.well-known/` passkey endpoints, boot diagnostics. Upstream syncs merge
+into `main` like any other branch. `deploy/railway/Dockerfile` (a wrapper around
+the stock upstream image) predates the fork build and is not what production
+runs — the stock image cannot serve fork-only endpoints.
 
 Port is pinned to 9119 (relay binds the config port, not Railway's `$PORT`;
 `--config-only` ignores CLI overrides). No scale-to-zero.
